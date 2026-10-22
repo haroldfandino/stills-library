@@ -1,0 +1,8 @@
+diff --git a/stills_tool/core.py b/stills_tool/core.py
+--- a/stills_tool/core.py
++++ b/stills_tool/core.py
+@@ -180,7 +180,7 @@ def _filter_file(directory, name, value):
+     path = Path(directory) / (name + ".filter")
+     path.write_text(value, encoding="utf-8")
+-    return ["-filter_script:v", str(path)]
++    return ["-/filter:v", str(path)]

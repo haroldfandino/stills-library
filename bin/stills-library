@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+# Bundled CLI launcher. Electron supplies its own Node runtime.
+resource_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+app_executable="$resource_dir/../MacOS/Stills Library"
+STILLS_LIBRARY_APP_EXECUTABLE=${STILLS_LIBRARY_APP_EXECUTABLE:-$app_executable}
+export STILLS_LIBRARY_APP_EXECUTABLE
+ELECTRON_RUN_AS_NODE=1 \
+exec "$app_executable" "$resource_dir/app.asar/dist/cli.cjs" "$@"

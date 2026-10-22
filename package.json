@@ -1,0 +1,40 @@
+{
+  "name": "stills-library",
+  "version": "0.1.0",
+  "private": true,
+  "productName": "Stills Library",
+  "description": "Supervised still extraction and library delivery for Filmkraft and Screenbridge",
+  "author": "Filmkraft",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build": "npm run build:renderer && npm run build:processes",
+    "build:renderer": "vite build",
+    "build:processes": "node scripts/build-processes.mjs",
+    "dev": "npm run build && electron .",
+    "start": "electron .",
+    "cli": "node dist/cli.cjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --root .",
+    "package": "npm run build && electron-forge package && node scripts/verify-package.mjs",
+    "make": "npm run build && electron-forge make && node scripts/verify-package.mjs",
+    "verify:package": "node scripts/verify-package.mjs"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^8.0.1",
+    "@electron-forge/maker-dmg": "^8.0.1",
+    "@electron-forge/maker-squirrel": "^8.0.1",
+    "@electron-forge/maker-zip": "^8.0.1",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "electron": "^45.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  }
+}
