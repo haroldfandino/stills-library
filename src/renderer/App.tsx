@@ -337,7 +337,7 @@ export default function App() {
   const previousDeliveryIds = useMemo(() => new Set(session?.revision?.uploads.map(file => `${file.videoId}:${file.frameId}`)), [session?.revision]);
   const versionFolderCount = [...folderCounts.keys()].filter(Boolean).length;
   const previewIndex = visibleFrames.findIndex(frame => frameKey(frame) === previewFrameId);
-  const previewFrame = visibleFrames[previewIndex];
+  const previewFrame = visibleFrames[previewIndex] ?? (approvedOnly ? videoFrames.find(frame => frameKey(frame) === previewFrameId) : undefined);
   useEffect(() => {
     if (previewFrameId && !previewFrame) setPreviewFrameId(undefined);
   }, [previewFrameId, previewFrame]);
@@ -552,7 +552,15 @@ export default function App() {
           ) : <section className="welcome-panel"><span className="welcome-symbol">▣</span><span className="eyebrow">STILLS LIBRARY</span><h2>{initializing ? "Loading projects…" : "Ready when you are"}</h2><p>{initializing ? "Reading your project queue." : "Connect Google and choose your source folders in Setup, then refresh the queue."}</p><ActionButton variant="primary" onClick={() => setSettingsOpen(true)}>Open setup →</ActionButton></section>}
         </main>
       </div>
-      {previewFrame && session?.status === "awaiting_stills" && <FramePreview frame={previewFrame} selected={checkedFrames.has(frameKey(previewFrame))} index={previewIndex} count={visibleFrames.length} folder={frameFolder(previewFrame)} onClose={() => setPreviewFrameId(undefined)} onMove={(offset) => { const next = visibleFrames[previewIndex + offset]; if (next) setPreviewFrameId(frameKey(next)); }} onToggle={() => toggleFrame(frameKey(previewFrame))} />}
+      {previewFrame && session?.status === "awaiting_stills" && <FramePreview frame={previewFrame} selected={checkedFrames.has(frameKey(previewFrame))} index={Math.max(0, previewIndex)} count={Math.max(1, visibleFrames.length)} folder={frameFolder(previewFrame)} onClose={() => setPreviewFrameId(undefined)} onMove={(offset) => { const next = visibleFrames[previewIndex + offset]; if (next) setPreviewFrameId(frameKey(next)); }} onToggle={() => {
+        const id = frameKey(previewFrame);
+        if (checkedFrames.has(id)) {
+          // Resolve the next candidate before Approved only removes this one.
+          const next = visibleFrames[previewIndex + 1] ?? (approvedOnly ? visibleFrames[previewIndex - 1] : undefined);
+          if (next) setPreviewFrameId(frameKey(next));
+        }
+        toggleFrame(id);
+      }} />}
     </div>
   );
 }
