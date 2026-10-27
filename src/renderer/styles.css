@@ -76,7 +76,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .frame-dialog-header > div { min-width: 0; }
 .frame-dialog-header strong { display: block; overflow-wrap: anywhere; font-size: 14px; }
 .frame-dialog-header span { display: block; color: var(--muted); font-size: 12px; margin-top: 5px; }
-.frame-dialog-image { height: min(68vh, 1000px); margin: 16px 0; background: #070b09; }
+.frame-dialog-image { height: min(68vh, calc(94vh - 220px), 1000px); margin: 16px 0; background: #070b09; }
 .frame-dialog-image img { display: block; height: 100%; width: 100%; object-fit: contain; }
 
 .workspace { display: grid; grid-template-columns: minmax(292px, 338px) minmax(0, 1fr); flex: 1; min-height: 0; overflow: hidden; }
@@ -349,3 +349,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .open-reviews>span { color:var(--text-muted); font-size:12px; }
 .open-reviews button { background:#1d2c25; color:#d8e0da; border:1px solid #3b4a40; border-radius:8px; padding:8px 10px; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; }
 .open-reviews button.selected { border-color:#dcf76b; color:#dcf76b; }
+
+.preview-navigation-mode { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:10px 0; }
+.preview-navigation-mode button { background:#1d2c25; color:#d8e0da; border:1px solid #3b4a40; border-radius:8px; padding:8px 12px; cursor:pointer; }
+.preview-navigation-mode button[aria-pressed="true"] { color:#101b18; background:#dcf76b; border-color:#dcf76b; }
+.preview-navigation-mode span { color:#aab7ad; font-size:12px; }

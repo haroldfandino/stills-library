@@ -4,6 +4,7 @@ import type { AppState, Frame, Project, Session } from "./bridge";
 import { getBridge } from "./bridge";
 import { VirtualFrameGrid } from "./VirtualFrameGrid";
 import { ReviewHistory, type ReviewSelection } from "./review-history";
+import { previewNavigation, type PreviewMode } from "./preview-navigation";
 import { projectSession, queueProjects } from "./session-view";
 
 type QueueFilter = "All" | "To Do" | "In Process" | "Done" | "Reviewed" | "Skip";
@@ -110,19 +111,21 @@ function ActionButton({
   return <button type="button" className={`button button-${variant}`} onClick={onClick} disabled={disabled} title={title}>{children}</button>;
 }
 
-function FramePreview({ frame, selected, index, count, folder, onClose, onMove, onToggle }: {
+function FramePreview({ frame, selected, index, count, folder, mode, onMode, hasPrevious, hasNext, onClose, onMove, onToggle }: {
   frame: Frame; selected: boolean; index: number; count: number; folder: string;
+  mode: PreviewMode; onMode: (mode: PreviewMode) => void; hasPrevious: boolean; hasNext: boolean;
   onClose: () => void; onMove: (offset: number) => void; onToggle: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { dialog.current?.showModal(); }, []);
   return <dialog className="frame-dialog" ref={dialog} onClose={onClose} aria-label="Review enlarged still" onKeyDown={(event) => {
-    if (event.key === "ArrowLeft" && index > 0) { event.preventDefault(); onMove(-1); }
-    if (event.key === "ArrowRight" && index + 1 < count) { event.preventDefault(); onMove(1); }
+    if (event.key === "ArrowLeft" && hasPrevious) { event.preventDefault(); onMove(-1); }
+    if (event.key === "ArrowRight" && hasNext) { event.preventDefault(); onMove(1); }
   }}>
-    <div className="frame-dialog-header"><div><strong>{frame.videoName || "Candidate still"}</strong><span>{frame.timecode || ""} · {index + 1} of {count}</span><span>Folder: {folder || "Project folder"}</span></div><ActionButton onClick={onClose}>Close ✕</ActionButton></div>
+    <div className="frame-dialog-header"><div><strong>{frame.videoName || "Candidate still"}</strong><span>{frame.timecode || ""} · {index >= 0 ? `${index + 1} of ${count}` : "Unselected candidate"} · {mode === "shot" ? `Shot ${frame.shotId ?? frame.shot ?? "unknown"}` : "Selected stills"}</span><span>Folder: {folder || "Project folder"}</span></div><ActionButton onClick={onClose}>Close ✕</ActionButton></div>
+    <div className="preview-navigation-mode" role="group" aria-label="Enlarged navigation"><button type="button" aria-pressed={mode === "selected"} onClick={() => onMode("selected")}>Selected stills</button><button type="button" aria-pressed={mode === "shot"} onClick={() => onMode("shot")}>Frames in this shot</button><span>← / → browse {mode === "shot" ? "all candidates in this shot" : "selected stills"}</span></div>
     <div className="frame-dialog-image"><FrameImage frame={frame} /></div>
-    <div className="frame-dialog-actions"><ActionButton onClick={() => onMove(-1)} disabled={index === 0}>← Previous</ActionButton><label className="preview-selection"><input type="checkbox" checked={selected} onChange={onToggle} /> Selected for delivery</label><ActionButton onClick={() => onMove(1)} disabled={index + 1 >= count}>Next →</ActionButton></div>
+    <div className="frame-dialog-actions"><ActionButton onClick={() => onMove(-1)} disabled={!hasPrevious}>← Previous</ActionButton><label className="preview-selection"><input type="checkbox" checked={selected} onChange={onToggle} /> Selected for delivery</label><ActionButton onClick={() => onMove(1)} disabled={!hasNext}>Next →</ActionButton></div>
   </dialog>;
 }
 
@@ -147,6 +150,7 @@ export default function App() {
   const [typeTag, setTypeTag] = useState("");
   const [yearTag, setYearTag] = useState("");
   const [previewFrameId, setPreviewFrameId] = useState<string>();
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("selected");
   const [filenamePage, setFilenamePage] = useState(0);
   const [approvedOnly, setApprovedOnly] = useState(false);
   const [reviewVideoId, setReviewVideoId] = useState("");
@@ -355,8 +359,8 @@ export default function App() {
   const visibleFilenamePage = Math.min(filenamePage, filenamePages - 1);
   const previousDeliveryIds = useMemo(() => new Set(session?.revision?.uploads.map(file => `${file.videoId}:${file.frameId}`)), [session?.revision]);
   const versionFolderCount = [...folderCounts.keys()].filter(Boolean).length;
-  const previewIndex = visibleFrames.findIndex(frame => frameKey(frame) === previewFrameId);
-  const previewFrame = visibleFrames[previewIndex] ?? (approvedOnly ? videoFrames.find(frame => frameKey(frame) === previewFrameId) : undefined);
+  const previewFrame = videoFrames.find(frame => frameKey(frame) === previewFrameId);
+  const previewNav = previewFrame ? previewNavigation(videoFrames, previewFrame, checkedFrames, previewMode) : undefined;
   useEffect(() => {
     if (previewFrameId && !previewFrame) setPreviewFrameId(undefined);
   }, [previewFrameId, previewFrame]);
@@ -577,11 +581,11 @@ export default function App() {
           ) : <section className="welcome-panel"><span className="welcome-symbol">▣</span><span className="eyebrow">STILLS LIBRARY</span><h2>{initializing ? "Loading projects…" : "Ready when you are"}</h2><p>{initializing ? "Reading your project queue." : "Connect Google and choose your source folders in Setup, then refresh the queue."}</p><ActionButton variant="primary" onClick={() => setSettingsOpen(true)}>Open setup →</ActionButton></section>}
         </main>
       </div>
-      {previewFrame && session?.status === "awaiting_stills" && !session.deferred && <FramePreview frame={previewFrame} selected={checkedFrames.has(frameKey(previewFrame))} index={Math.max(0, previewIndex)} count={Math.max(1, visibleFrames.length)} folder={frameFolder(previewFrame)} onClose={() => setPreviewFrameId(undefined)} onMove={(offset) => { const next = visibleFrames[previewIndex + offset]; if (next) setPreviewFrameId(frameKey(next)); }} onToggle={() => {
+      {previewFrame && session?.status === "awaiting_stills" && !session.deferred && <FramePreview frame={previewFrame} selected={checkedFrames.has(frameKey(previewFrame))} index={previewNav?.index ?? -1} count={previewNav?.count ?? 0} mode={previewMode} onMode={setPreviewMode} hasPrevious={Boolean(previewNav?.previous)} hasNext={Boolean(previewNav?.next)} folder={frameFolder(previewFrame)} onClose={() => setPreviewFrameId(undefined)} onMove={(offset) => { const next = offset < 0 ? previewNav?.previous : previewNav?.next; if (next) setPreviewFrameId(frameKey(next)); }} onToggle={() => {
         const id = frameKey(previewFrame);
         if (checkedFrames.has(id)) {
           // Resolve the next candidate before Approved only removes this one.
-          const next = visibleFrames[previewIndex + 1] ?? (approvedOnly ? visibleFrames[previewIndex - 1] : undefined);
+          const next = previewNav?.next ?? (previewMode === "selected" ? previewNav?.previous : undefined);
           if (next) setPreviewFrameId(frameKey(next));
         }
         toggleFrame(id);
