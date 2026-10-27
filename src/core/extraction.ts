@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { copyFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { VideoCandidate } from './media.js';
 
@@ -23,6 +23,7 @@ export interface FrameCandidate {
   shotId: number;
   score: number;
   reasons: string[];
+  finalFrame?: boolean;
 }
 
 export interface AnalysisRecord {
@@ -100,6 +101,7 @@ interface AnalysisJson {
     reasons?: string[];
   }>;
   selected_ids: number[];
+  video?: { frame_count: number; frames: Array<{ timestamp: number; pts?: number }> };
 }
 
 interface ExportResult {
@@ -123,6 +125,33 @@ function assertWithin(root: string, child: string): string {
   return absolute;
 }
 
+async function stagedPath(root: string, child: string): Promise<string> {
+  // Native tools can return canonical paths for a redirected Windows AppData
+  // root or a junction. Compare actual locations rather than rejecting those
+  // aliases first; a child junction that escapes the real root still fails.
+  // Win32 removes trailing dots/spaces when native tools create directories,
+  // but their JSON may retain the requested spelling. Resolve that spelling
+  // before realpath; still check the canonical target for junction escapes.
+  const nativeSpelling = (value: string) => process.platform === 'win32' && !value.startsWith('\\\\?\\')
+    ? path.resolve(value).split(path.sep).map(part => part.replace(/[. ]+$/, '')).join(path.sep)
+    : value;
+  const resolveNative = async (value: string) => {
+    try { return await realpath(value); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || nativeSpelling(value) === value) throw error;
+      return realpath(nativeSpelling(value));
+    }
+  };
+  const [actualRoot, actualChild] = await Promise.all([resolveNative(root), resolveNative(child)]);
+  return assertWithin(actualRoot, actualChild);
+}
+
+async function sameSource(expected: string, actual: string): Promise<boolean> {
+  const [left, right] = await Promise.all([realpath(expected), realpath(actual)]);
+  // path.relative respects Windows drive/separator and case conventions.
+  return path.relative(left, right) === '';
+}
+
 async function runCommand(spec: CommandSpec, args: string[], options: { cwd?: string; input?: string } = {}): Promise<string> {
   if (!spec.command) throw new Error('Tool command is not configured.');
   return new Promise((resolve, reject) => {
@@ -144,7 +173,16 @@ async function runCommand(spec: CommandSpec, args: string[], options: { cwd?: st
     child.on('error', reject);
     child.on('close', code => {
       if (code === 0) resolve(stdout);
-      else reject(new Error(`${spec.command} exited ${code}: ${stderr || stdout}`.slice(-4000)));
+      else {
+        let detail = '';
+        // Native inference libraries emit harmless startup warnings on stderr.
+        // Extract Stills reports the actionable failure in its JSON stdout.
+        try {
+          const payload = JSON.parse(stdout) as ToolPayload<unknown>;
+          detail = payload.errors?.map(item => item.error).filter(Boolean).join('; ') ?? '';
+        } catch { /* Non-JSON tools report their errors on stderr. */ }
+        reject(new Error(`${spec.command} exited ${code}: ${detail || stderr || stdout}`.slice(-4000)));
+      }
     });
     child.stdin.on('error', () => { /* A fast failing process may close stdin first. */ });
     child.stdin.end(options.input ?? '');
@@ -173,7 +211,7 @@ function timecode(seconds: number): string {
 
 /** Runs Smart analysis in staging and exposes every preview, including alternatives. */
 export async function analyzeVideos(
-  videos: VideoCandidate[], stagingRoot: string, extractTool: CommandSpec,
+  videos: VideoCandidate[], stagingRoot: string, extractTool: CommandSpec, ffmpegPath = 'ffmpeg',
 ): Promise<AnalysisBundle> {
   const selected = videos.filter(video => video.selected);
   if (!selected.length) throw new Error('Select at least one video before analysis.');
@@ -186,27 +224,63 @@ export async function analyzeVideos(
     const result = await runJsonTool<AnalyzeResult>(extractTool, [
       'analyze', video.path, '--output', analysisRoot, '--format', 'png', '--json',
     ]);
-    const analysisPath = assertWithin(analysisRoot, result.analysis);
-    const analysis = JSON.parse(await readFile(analysisPath, 'utf8')) as AnalysisJson;
-    if (path.resolve(analysis.source) !== path.resolve(video.path)) {
+    const analysisPath = await stagedPath(analysisRoot, result.analysis);
+    // Native fingerprints include nanosecond timestamps larger than JavaScript's
+    // exact integer range. Preserve their original JSON digits when adding the
+    // final candidate, or an unchanged source can falsely fail export validation.
+    const analysis = JSON.parse(await readFile(analysisPath, 'utf8'),
+      (_key: string, value: unknown, context?: { source: string }) =>
+        typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value) && context
+          ? (JSON as typeof JSON & { rawJSON(text: string): unknown }).rawJSON(context.source) : value) as AnalysisJson;
+    if (!await sameSource(video.path, analysis.source) || !await sameSource(video.path, result.source)) {
       throw new Error(`Analysis source differs from selected video: ${video.name}`);
     }
+    if (!Array.isArray(analysis.candidates) || !Array.isArray(analysis.selected_ids)) {
+      throw new Error(`Analysis has invalid candidate data for ${video.name}.`);
+    }
     const analysisDir = path.dirname(analysisPath);
+    if (!analysis.video) throw new Error(`Analysis does not identify the final source frame for ${video.name}. Update Extract Stills before continuing.`);
+    const finalIndex = analysis.video ? analysis.video.frame_count - 1 : undefined;
+    if (finalIndex !== undefined) {
+      const timing = analysis.video!.frames[finalIndex];
+      if (!Number.isSafeInteger(finalIndex) || finalIndex < 0 || !timing || !Number.isFinite(timing.timestamp)) {
+        throw new Error(`Cannot identify the final source frame for ${video.name}.`);
+      }
+      if (!analysis.candidates.some(frame => frame.id === finalIndex)) {
+        const preview = `final-frame-${randomUUID()}.jpg`;
+        await runCommand({ command: ffmpegPath }, ['-v', 'error', '-nostdin', '-n', '-i', video.path,
+          '-map', '0:v:0', '-vf', `select=eq(n\\,${finalIndex}),scale=960:960:force_original_aspect_ratio=decrease`,
+          '-frames:v', '1', '-fps_mode', 'vfr', '-q:v', '2', path.join(analysisDir, preview)]);
+        analysis.candidates.push({ id: finalIndex, preview, timestamp: timing.timestamp,
+          shot_id: Math.max(0, ...analysis.candidates.map(frame => frame.shot_id ?? frame.scene_id ?? 0)),
+          score: 0, reasons: ['Final source frame included by default'] });
+      }
+      if (!analysis.selected_ids.includes(finalIndex)) analysis.selected_ids.push(finalIndex);
+      analysis.candidates.sort((a, b) => a.id - b.id);
+      await writeFile(analysisPath, JSON.stringify(analysis, null, 2));
+    }
     const selectedIds = new Set(analysis.selected_ids);
     const ids = new Set<number>();
     for (const candidate of analysis.candidates) {
       if (!Number.isSafeInteger(candidate.id) || candidate.id < 0 || ids.has(candidate.id)) {
         throw new Error(`Analysis has invalid candidate IDs for ${video.name}.`);
       }
+      if (!Number.isFinite(candidate.timestamp) || candidate.timestamp < 0) {
+        throw new Error(`Analysis has an invalid frame timestamp for ${video.name}.`);
+      }
       ids.add(candidate.id);
-      const previewPath = assertWithin(analysisDir, path.resolve(analysisDir, candidate.preview));
+      const previewPath = await stagedPath(analysisDir, path.resolve(analysisDir, candidate.preview));
       if (!(await stat(previewPath)).isFile()) throw new Error(`Candidate preview is missing: ${previewPath}`);
       frames.push({
         id: `${video.id}:${candidate.id}`, previewPath, selected: selectedIds.has(candidate.id),
+        finalFrame: candidate.id === finalIndex,
         videoName: video.name, videoId: video.id, frameId: candidate.id,
         timecode: timecode(candidate.timestamp), shotId: candidate.shot_id ?? candidate.scene_id ?? 0,
         score: candidate.score ?? 0, reasons: candidate.reasons ?? [],
       });
+    }
+    if (selectedIds.size !== analysis.selected_ids.length || [...selectedIds].some(id => !ids.has(id))) {
+      throw new Error(`Analysis selected unknown or duplicate frame IDs for ${video.name}.`);
     }
     analyses.push({ videoId: video.id, videoName: video.name, analysisPath,
       candidateFrameIds: [...ids], selectedFrameIds: [...selectedIds], warnings: result.warnings ?? [] });
@@ -229,11 +303,16 @@ export async function exportApprovedFrames(
   for (const analysis of analyses) {
     const frameIds = analysis.candidateFrameIds.filter(id => requested.has(`${analysis.videoId}:${id}`));
     if (!frameIds.length) continue;
+    const analysisPath = await stagedPath(path.resolve(stagingRoot, 'analysis'), analysis.analysisPath);
+    const stored = JSON.parse(await readFile(analysisPath, 'utf8')) as AnalysisJson;
     const result = await runJsonTool<ExportResult>(extractTool, [
-      'export', analysis.analysisPath, '--frames', frameIds.join(','), '--output', exportsRoot,
+      'export', analysisPath, '--frames', frameIds.join(','), '--output', exportsRoot,
       '--format', 'png', '--json',
     ]);
-    assertWithin(exportsRoot, result.output_dir);
+    if (!await sameSource(stored.source, result.source)) {
+      throw new Error(`Export source differs from approved video: ${analysis.videoName}`);
+    }
+    const outputDir = await stagedPath(exportsRoot, result.output_dir);
     if (result.files.length !== frameIds.length) throw new Error(`Export count mismatch for ${analysis.videoName}.`);
     const returned = new Set<number>();
     for (const file of result.files) {
@@ -241,7 +320,7 @@ export async function exportApprovedFrames(
         throw new Error(`Extract Stills returned an unexpected frame for ${analysis.videoName}.`);
       }
       returned.add(file.frame_index);
-      const sourcePath = assertWithin(exportsRoot, file.path);
+      const sourcePath = await stagedPath(outputDir, file.path);
       if (path.extname(sourcePath).toLowerCase() !== '.png' || !(await stat(sourcePath)).isFile()) {
         throw new Error(`Expected exported PNG is missing: ${sourcePath}`);
       }

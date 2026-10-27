@@ -8,8 +8,8 @@ export const SHEETS = {
 export const DEFAULT_CONFIG: AppConfig = {
   googleClientId: '',
   sourceRoots: {
-    filmkraft: '/Volumes/filmkraft/filespace/Filmkraft',
-    screenbridge: '/Volumes/filmkraft/filespace/Screenbridge',
+    filmkraft: process.platform === 'win32' ? '' : '/Volumes/filmkraft/filespace/Filmkraft',
+    screenbridge: process.platform === 'win32' ? '' : '/Volumes/filmkraft/filespace/Screenbridge',
   },
   destinationFolders: {
     filmkraft: '1DQr_5OSdnZluCyACHdaSLoQsp2sOBp2S',

@@ -1,10 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import type { AppConfig, Project, Session } from '../shared/contracts';
+import type { AppConfig, Project, Session, BatchRun } from '../shared/contracts';
 import { DEFAULT_CONFIG } from '../shared/defaults';
 
 export interface PersistedData {
+  batch?: BatchRun;
   config: AppConfig;
   projects: Project[];
   sessions: Session[];
@@ -40,6 +41,7 @@ export class JsonStore {
         projects: raw.projects ?? [],
         sessions: raw.sessions ?? [],
         currentSessionId: raw.currentSessionId,
+        batch: raw.batch,
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -48,6 +50,9 @@ export class JsonStore {
   }
 
   get(): PersistedData { return structuredClone(this.value); }
+
+  /** Project before cloning so a small UI read never duplicates the full history. */
+  read<T>(select: (state: Readonly<PersistedData>) => T): T { return structuredClone(select(this.value)); }
 
   async update(change: (state: PersistedData) => void): Promise<PersistedData> {
     // A failed disk write must not permanently poison later updates.

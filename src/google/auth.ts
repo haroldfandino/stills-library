@@ -33,6 +33,7 @@ export class MemoryGoogleTokenStore implements GoogleTokenStore {
 
 export interface GoogleAuthOptions {
   clientId: string;
+  clientSecret?: string;
   tokenStore: GoogleTokenStore;
   /** In Electron, inject shell.openExternal. Must launch the system browser. */
   openBrowser(url: string): Promise<unknown> | unknown;
@@ -83,6 +84,7 @@ function hasDriveScopes(scope: string | undefined): boolean {
 
 export class GoogleAuth {
   private readonly clientId: string;
+  private readonly clientSecret?: string;
   private readonly tokenStore: GoogleTokenStore;
   private readonly openBrowser: GoogleAuthOptions['openBrowser'];
   private readonly expectedEmail: string;
@@ -92,7 +94,8 @@ export class GoogleAuth {
 
   constructor(options: GoogleAuthOptions) {
     if (!options.clientId.trim()) throw new Error('Google desktop OAuth client ID is required.');
-    this.clientId = options.clientId;
+    this.clientId = options.clientId.trim();
+    this.clientSecret = options.clientSecret;
     this.tokenStore = options.tokenStore;
     this.openBrowser = options.openBrowser;
     this.expectedEmail = (options.expectedEmail ?? 'harold@filmkraft.tv').trim().toLowerCase();
@@ -214,10 +217,12 @@ export class GoogleAuth {
   }
 
   private async postToken(body: URLSearchParams): Promise<TokenResponse> {
+    if (this.clientSecret) body.set('client_secret', this.clientSecret);
     const response = await this.fetchImpl(TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
+      signal: AbortSignal.timeout(30_000),
     });
     const data = await response.json().catch(() => ({})) as TokenResponse;
     if (!response.ok) throw safeError(data, response.status, TOKEN_URL);
@@ -236,6 +241,7 @@ export class GoogleAuth {
       rejectCallback = reject;
     });
     server = createServer((request, response) => {
+      if (request.method !== 'GET') { response.writeHead(405).end(); return; }
       const address = server.address();
       if (!address || typeof address === 'string' || request.headers.host !== `127.0.0.1:${address.port}`) {
         response.writeHead(400).end('Invalid callback host.');

@@ -20,7 +20,8 @@ PNG = base64.b64decode(
 
 
 def digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def resources(executable: Path) -> Path:
@@ -36,7 +37,9 @@ def check_resources(executable: Path) -> None:
     ids = set()
     for item in manifest["models"]:
         ids.add(item["id"])
-        asset = root / "models" / item["filename"]
+        asset = (root / "models" / item["filename"]).resolve()
+        if not asset.is_relative_to((root / "models").resolve()):
+            raise ValueError(f"Unsafe bundled model filename: {item['filename']}")
         if not asset.is_file() or asset.stat().st_size != item["size_bytes"] or digest(asset) != item["sha256"]:
             raise ValueError(f"Missing or modified bundled model: {asset}")
     if not {"face_landmarker", "text_detector", "text_recognizer", "text_dictionary"} <= ids:
@@ -48,6 +51,11 @@ def check_resources(executable: Path) -> None:
     for name in ("EXTRACT-STILLS-LICENSE.txt", "FFMPEG-BINARIES.json", "PYTHON-PACKAGES.json"):
         if not (root / "licenses" / name).is_file():
             raise ValueError(f"Missing bundled notice: {name}")
+    ffmpeg_records = json.loads((root / "licenses" / "FFMPEG-BINARIES.json").read_text(encoding="utf-8"))
+    for name in ("ffmpeg", "ffprobe"):
+        binary = root / "binaries" / f"{name}{suffix}"
+        if digest(binary) != ffmpeg_records[name]["sha256"]:
+            raise ValueError(f"Bundled {name} differs from its recorded build: {binary}")
 
 
 def check_rename(executable: Path) -> None:
@@ -101,6 +109,14 @@ def main() -> int:
         cli = extract / f"extract-stills{suffix}"
         if not cli.is_file() or not rename.is_file():
             raise ValueError(f"Missing native executable: {cli} or {rename}")
+        if args.native_dir:
+            for binary, key in ((cli, "extract_executable_sha256"), (rename, "rename_executable_sha256")):
+                if digest(binary) != metadata[key]:
+                    raise ValueError(f"Native executable differs from its build manifest: {binary}")
+            report = directory / "packaged-verification.json"
+            verification = json.loads(report.read_text(encoding="utf-8"))
+            if verification.get("status") != "passed" or verification.get("offline_assets_verified") is not True:
+                raise ValueError("The bundle has no passing packaged extraction verification.")
         check_resources(cli)
         check_rename(rename)
         if not args.skip_extract_smoke:
@@ -110,7 +126,7 @@ def main() -> int:
             subprocess.run([sys.executable, str(checker), "--cli", str(cli)], check=True, timeout=600)
         print(f"Native sidecars verified: {extract.parent}")
         return 0
-    except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         print(f"Native verification failed: {error}", file=sys.stderr)
         return 1
 

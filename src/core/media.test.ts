@@ -16,6 +16,41 @@ function video(name: string, overrides: Partial<VideoCandidate> = {}): VideoCand
 }
 
 describe('project lookup', () => {
+  it('uses archived client-delivery videos and excludes internal review exports', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'stills-client-'));
+    temporary.push(root);
+    const delivery = path.join(root, '03_FINAL_DELIVERY', '03_CLIENT_DELIVERY', '04_VIDEOS');
+    const internal = path.join(root, '03_FINAL_DELIVERY', '01_INTERNAL_REVIEW');
+    await mkdir(delivery, { recursive: true });
+    await mkdir(internal, { recursive: true });
+    await writeFile(path.join(delivery, 'Approved_30_Social_H264.mp4'), 'fixture');
+    await writeFile(path.join(internal, 'Draft_60.mp4'), 'fixture');
+    const found = await discoverProjectFolderVideos({ projectFolder: root, ffprobePath: path.join(root, 'missing') });
+    expect(found.videos.map(video => video.name)).toEqual(['Approved_30_Social_H264.mp4']);
+  });
+  it('accepts mounted Google Drive collection roots and year archives', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'stills-drive-'));
+    temporary.push(root);
+    const active = path.join(root, '02_ActiveProjects_Screenbridge');
+    const archived = path.join(root, '03_ArchivedProjects', '2025', '[1234]Brand');
+    await mkdir(path.join(active, '[5678]Other'), { recursive: true });
+    await mkdir(archived, { recursive: true });
+    expect(await findProjectFolder(active, '5678')).toBe(path.join(active, '[5678]Other'));
+    expect(await findProjectFolder(path.join(root, '03_ArchivedProjects'), '1234')).toBe(archived);
+    expect(await findProjectFolder(root, '1234')).toBe(archived);
+  });
+  it('finds archived and no-code projects and rejects ambiguous copies', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'stills-archive-'));
+    temporary.push(root);
+    const archived = path.join(root, '02_ArchivedProjects', '2025', '[1234]Brand');
+    const noCode = path.join(root, '02_ArchivedProjects', '2024', 'Fatty15_Ricky_Lake');
+    await mkdir(archived, { recursive: true });
+    await mkdir(noCode, { recursive: true });
+    expect(await findProjectFolder(root, '1234')).toBe(archived);
+    expect(await findProjectFolder(root, undefined, 'Fatty15 Ricky Lake')).toBe(noCode);
+    await mkdir(path.join(root, '01_ActiveProjects', '[1234]Brand'), { recursive: true });
+    await expect(findProjectFolder(root, '1234', '[1234]Brand')).rejects.toThrow(/Multiple/);
+  });
   it('matches the bracketed code exactly, including year subfolders', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'stills-project-'));
     temporary.push(root);

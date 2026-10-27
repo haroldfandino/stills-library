@@ -1,0 +1,48 @@
+diff --git a/stills_tool/text_ocr.py b/stills_tool/text_ocr.py
+index 4876266..5e288e4 100644
+--- a/stills_tool/text_ocr.py
++++ b/stills_tool/text_ocr.py
+@@ -222,7 +222,17 @@ class TextRecognizer:
+         for region in regions:
+             item = dict(region)
+             item["clipped"] = region_is_clipped(region, frame.shape)
+-            crop = rectify_region(frame, region)
++            try:
++                crop = rectify_region(frame, region)
++            except ValueError as error:
++                if str(error) not in {"Text region polygon is degenerate", "Text region is too small to rectify"}:
++                    raise
++                # A detector can return a collapsed edge region. Retain it as
++                # unreadable evidence rather than aborting the entire video.
++                item.update(text="", recognition_confidence=0.0,
++                            recognition_characters=[], recognition_error=str(error))
++                result.append(item)
++                continue
+             details = self._oriented_details(crop)
+             text, confidence = details["text"], details["recognition_confidence"]
+             # DB can shrink a superscript/short-number crop inside the glyphs.
+diff --git a/tests/test_text_recognition.py b/tests/test_text_recognition.py
+index 236acd4..f3d3fdf 100644
+--- a/tests/test_text_recognition.py
++++ b/tests/test_text_recognition.py
+@@ -443,3 +443,20 @@ def test_native_band_refinement_preserves_complete_fatty_headline_words(recogniz
+     assert all(item["refined_native"] and item["complete_geometry"] and not item["clipped"] for item in headline)
+     footer = [item for item in recognized if "These statements" in item["text"]]
+     assert footer and footer[0]["text"].endswith("Food and Drug Administration.")
++
++
++def test_collapsed_detector_region_does_not_abort_other_text(monkeypatch):
++    reader = TextRecognizer.__new__(TextRecognizer)
++    monkeypatch.setattr(reader, "_oriented_details", lambda crop: {
++        "text": "VALID", "recognition_confidence": .99, "recognition_characters": []})
++    frame = np.zeros((160, 320, 3), np.uint8)
++    bad = {"polygon": [[40, 40]] * 4}
++    good = {"polygon": [[40, 40], [239, 40], [239, 89], [40, 89]]}
++    result = reader.recognize(frame, [bad, good])
++    assert len(result) == 2
++    assert result[0]["recognition_confidence"] == 0
++    assert result[0]["text"] == ""
++    assert "degenerate" in result[0]["recognition_error"]
++    assert result[1]["text"] == "VALID"
++    with pytest.raises(ValueError, match="finite"):
++        reader.recognize(frame, [{"polygon": [[float("nan"), 40]] * 4}])

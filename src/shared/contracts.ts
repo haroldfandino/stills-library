@@ -35,6 +35,9 @@ export interface Video {
   height?: number;
   voiceover?: string;
   channel?: string;
+  createdAt?: string;
+  fileCreatedAt?: string;
+  fileModifiedAt?: string;
 }
 
 export interface Frame {
@@ -46,6 +49,7 @@ export interface Frame {
   videoName?: string;
   timecode?: string;
   selected?: boolean;
+  finalFrame?: boolean;
 }
 
 export interface Naming {
@@ -70,6 +74,14 @@ export interface Session {
   stagingPath?: string;
   destinationUrl?: string;
   destinationFolderId?: string;
+  /** Reviewed delivery paths keyed by video ID; aspect/version when multiple ratios, otherwise version. */
+  versionFolders?: Record<string, string>;
+  previousDeliveryManifest?: string;
+  revision?: { id: string; uploads: unknown[]; exports: unknown[]; phase: 'staging' | 'finishing' | 'ready';
+    folderCleanup?: { id: string; parentId: string; name: string; status: 'planned' | 'trashed' | 'kept' }[] };
+  yearSuggestion?: { year: string; reason: string };
+  automaticRunId?: string;
+  deferred?: boolean;
   naming?: Naming;
   error?: string;
   message?: string;
@@ -85,6 +97,7 @@ export interface Session {
 export interface AppConfig {
   googleClientId: string;
   sourceRoots: Record<Studio, string>;
+  additionalSources?: Array<{ path: string; url: string; label: string }>;
   destinationFolders: Record<Studio, string>;
   extractExecutable?: string;
   renameExecutable?: string;
@@ -94,6 +107,8 @@ export interface AppConfig {
 }
 
 export interface AppState {
+  batch?: BatchRun;
+  googleClientId?: string;
   accountEmail?: string;
   authenticated: boolean;
   configured: boolean;
@@ -101,6 +116,30 @@ export interface AppState {
   sessions: Session[];
   currentSessionId?: string;
   sourceRoots: Record<Studio, string>;
+  additionalSources?: Array<{ path: string; url: string; label: string }>;
   destinationFolders: Record<Studio, string>;
   error?: string;
+}
+
+export interface BatchEntry {
+  project: Project;
+  status: 'pending' | 'running' | 'done' | 'skipped' | 'failed';
+  sessionId?: string;
+  reason?: string;
+  year?: string;
+  videos?: number;
+  stills?: number;
+  destinationUrl?: string;
+}
+
+export interface BatchRun {
+  id: string;
+  status: 'running' | 'paused' | 'complete';
+  entries: BatchEntry[];
+  excluded: Project[];
+  startedAt: string;
+  updatedAt: string;
+  reportPath: string;
+  error?: string;
+  pauseRequested?: boolean;
 }

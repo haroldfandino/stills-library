@@ -1,6 +1,6 @@
 export type Studio = "filmkraft" | "screenbridge" | (string & {});
 
-export type ProjectStatus = "To Do" | "In Process" | "Done" | "Skip" | (string & {});
+export type ProjectStatus = "To Do" | "In Process" | "Done" | "Reviewed" | "Skip" | (string & {});
 
 export interface Project {
   id: string;
@@ -30,6 +30,7 @@ export interface Video {
 }
 
 export interface Frame {
+  finalFrame?: boolean;
   id: string;
   videoId?: string;
   previewUrl?: string;
@@ -55,6 +56,11 @@ export type SessionStatus =
   | (string & {});
 
 export interface Session {
+  detailsOmitted?: boolean;
+  revisionActive?: boolean;
+  updatedAt?: string;
+  yearSuggestion?: { year: string; reason: string };
+  automaticRunId?: string;
   id: string;
   projectId: string;
   projectName?: string;
@@ -66,6 +72,9 @@ export interface Session {
   manualSourcePath?: string;
   stagingPath?: string;
   destinationUrl?: string;
+  versionFolders?: Record<string, string>;
+  previousDeliveryManifest?: string;
+  revision?: { id: string; uploads: { videoId: string; frameId: number }[]; phase: string };
   error?: string;
   message?: string;
   lastPhase?: SessionStatus;
@@ -75,6 +84,8 @@ export interface Session {
 }
 
 export interface AppState {
+  batch?: import('../shared/contracts').BatchRun;
+  googleClientId?: string;
   accountEmail?: string;
   authenticated?: boolean;
   configured?: boolean;
@@ -82,11 +93,16 @@ export interface AppState {
   sessions?: Session[];
   currentSessionId?: string;
   sourceRoots?: Record<string, string>;
+  additionalSources?: Array<{ path: string; url: string; label: string }>;
   error?: string;
 }
 
 export interface StillsApi {
+  retryBatch(): Promise<unknown>;
+  startBatch(): Promise<unknown>;
+  pauseBatch(): Promise<unknown>;
   getState(): Promise<AppState>;
+  getSession(id: string): Promise<Session | undefined>;
   listProjects(): Promise<Project[]>;
   prepare(studio: Studio, id: string): Promise<Session | AppState | void>;
   approveVideos(sessionId: string, videoIds: string[]): Promise<unknown>;
@@ -97,12 +113,17 @@ export interface StillsApi {
   ): Promise<unknown>;
   skip(sessionId: string): Promise<unknown>;
   resume(sessionId: string): Promise<unknown>;
+  setReviewed(studio: Studio, projectId: string, reviewed: boolean): Promise<unknown>;
+  reviewAgain(sessionId: string): Promise<unknown>;
   openPath(path: string): Promise<unknown>;
+  revealPath(path: string): Promise<unknown>;
   openUrl(url: string): Promise<unknown>;
   chooseRoots(studio?: Studio): Promise<unknown>;
   chooseProjectSource(sessionId: string): Promise<unknown>;
   signIn(): Promise<unknown>;
+  signOut(): Promise<unknown>;
   configureGoogle(clientId: string): Promise<unknown>;
+  importGoogleCredentials(): Promise<unknown>;
   onState(callback: (state: AppState) => void): void | (() => void);
 }
 

@@ -1,0 +1,96 @@
+diff --git a/stills_tool/core.py b/stills_tool/core.py
+--- a/stills_tool/core.py
++++ b/stills_tool/core.py
+@@ -219,8 +219,19 @@
+
+
+ def _write_preview(path, frame):
+-    if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 94]):
++    # OpenCV's Windows file APIs cannot open every Unicode path. Keep its
++    # image codec, but let Python perform filesystem I/O with wide paths.
++    success, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 94])
++    if not success:
+         raise IOError(f"Cannot write preview: {path}")
++    Path(path).write_bytes(encoded.tobytes())
++
++
++def _read_preview(path):
++    image = cv2.imdecode(np.frombuffer(Path(path).read_bytes(), dtype=np.uint8), cv2.IMREAD_COLOR)
++    if image is None:
++        raise IOError(f"Cannot read preview: {path}")
++    return image
+
+
+ def _decode_scan(source, video, directory, progress, cancel):
+@@ -698,7 +709,7 @@
+             candidate["duplicate_of"] = exact[candidate["native_hash"]]
+             candidate["reasons"].append("Exact duplicate of a stronger candidate")
+         else:
+-            image = cv2.imread(str(directory / candidate["preview"]))
++            image = _read_preview(directory / candidate["preview"])
+             phash = phasher.compute(image)
+             for other, other_hash in representatives:
+                 if candidate.get("text_contents", []) != other.get("text_contents", []):
+@@ -707,7 +718,7 @@
+                     continue
+                 if phasher.compare(phash, other_hash) > 6:
+                     continue
+-                other_preview = cv2.imread(str(directory / other["preview"]))
++                other_preview = _read_preview(directory / other["preview"])
+                 # Most perceptual-hash matches are distinct textured or moving
+                 # frames. Reject those cheaply before source-resolution checks.
+                 # Full resolution still confirms every proposed duplicate merge.
+diff --git a/tests/test_core.py b/tests/test_core.py
+--- a/tests/test_core.py
++++ b/tests/test_core.py
+@@ -324,6 +324,28 @@
+         np.testing.assert_allclose(read_pixels(item["path"]), frames[item["frame_index"]], atol=1)
+
+
++def test_unicode_source_and_output_paths_preserve_previews_and_export(tmp_path, ffmpeg, neutral_vision):
++    directory = tmp_path / "stills caf\u00e9 \u65e5\u672c\u8a9e"
++    directory.mkdir()
++    frames = patterned_frames(9)
++    source = encode(ffmpeg, directory / "source caf\u00e9.mkv", frames)
++    before = source.read_bytes()
++    analysis = core.analyze_video(source, Options(output=directory / "analysis \u65e5\u672c\u8a9e"))
++    assert analysis["selected_ids"]
++    for candidate in analysis["candidates"]:
++        preview = Path(analysis["analysis_dir"]) / candidate["preview"]
++        with Image.open(preview) as image:
++            assert image.size == (frames[0].shape[1], frames[0].shape[0])
++        assert core._read_preview(preview).shape == frames[0].shape
++    result = core.export_analysis(analysis, Options(output=directory / "export caf\u00e9"))
++    assert result["files"]
++    for item in result["files"]:
++        with Image.open(item["path"]) as image:
++            pixels = np.asarray(image.convert("RGB"))[:, :, ::-1]
++            np.testing.assert_allclose(pixels, frames[item["frame_index"]], atol=1)
++    assert source.read_bytes() == before
++
++
+ def test_hdr_to_srgb_is_nonblank_monotonic_and_profiled(tmp_path, ffmpeg):
+     frame = np.zeros((48, 80, 3), dtype="<u2")
+     for index, value in enumerate((5000, 16000, 32000, 48000)):
+diff --git a/scripts/verify_packaged.py b/scripts/verify_packaged.py
+--- a/scripts/verify_packaged.py
++++ b/scripts/verify_packaged.py
+@@ -243,7 +243,7 @@
+         env.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "NO_PROXY": "", "no_proxy": "",
+                     "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9",
+                     "http_proxy": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9"})
+-        with tempfile.TemporaryDirectory(prefix="extract-stills-packaged-") as directory:
++        with tempfile.TemporaryDirectory(prefix="extract-stills-packaged-caf\u00e9-") as directory:
+             cwd = Path(directory)
+             fixture = cwd / "synthetic.mkv"
+             run([str(ffmpeg), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+@@ -279,7 +279,8 @@
+                 if digest(fixture) != original:
+                     raise ValueError("The legacy worker modified its source fixture.")
+             payload = {"status": "passed", "version": version, "images": len(images),
+-                              "restricted_path": True, "source_preserved": True,
++                              "restricted_path": True, "unicode_paths_verified": True,
++                              "source_preserved": True,
+                               "original_resolution": True, "png_8bit_icc_verified": True,
+                               "tiff_16bit_icc_verified": True,
+                               "wording_and_sharpness": wording,

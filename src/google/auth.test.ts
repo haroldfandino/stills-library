@@ -6,6 +6,57 @@ import {
 const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
 describe('Google desktop OAuth', () => {
+  it('uses imported client configuration for both code exchange and refresh without placing its secret in the browser URL', async () => {
+    const tokenStore = new MemoryGoogleTokenStore();
+    const requests: URLSearchParams[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!String(input).includes('/token')) return json({ email: 'harold@filmkraft.tv', email_verified: true });
+      requests.push(new URLSearchParams(String(init?.body)));
+      return json({ access_token: `token-${requests.length}`, refresh_token: 'refresh', expires_in: 3600,
+        scope: `${DRIVE_FILE_SCOPE} ${DRIVE_METADATA_SCOPE}` });
+    }) as unknown as typeof fetch;
+    const auth = new GoogleAuth({ clientId: 'desktop-client-id', clientSecret: 'test-secret', tokenStore, fetchImpl,
+      openBrowser: async value => {
+        const url = new URL(value);
+        expect(url.searchParams.has('client_secret')).toBe(false);
+        const callback = new URL(url.searchParams.get('redirect_uri')!);
+        callback.searchParams.set('state', url.searchParams.get('state')!);
+        callback.searchParams.set('code', 'test-code');
+        await fetch(callback);
+      } });
+    await auth.signIn();
+    expect(await auth.getAccessToken(true)).toBe('token-2');
+    expect(requests.map(body => body.get('grant_type'))).toEqual(['authorization_code', 'refresh_token']);
+    expect(requests.every(body => body.get('client_secret') === 'test-secret')).toBe(true);
+  });
+
+  it('ignores forged callback state and wrong methods, then accepts the real callback', async () => {
+    const tokenStore = new MemoryGoogleTokenStore();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => String(input).includes('/token')
+      ? json({ access_token: 'token', scope: `${DRIVE_FILE_SCOPE} ${DRIVE_METADATA_SCOPE}` })
+      : json({ email: 'harold@filmkraft.tv', email_verified: true })) as unknown as typeof fetch;
+    const auth = new GoogleAuth({ clientId: 'desktop-client-id', tokenStore, fetchImpl,
+      openBrowser: async value => {
+        const url = new URL(value);
+        const callback = new URL(url.searchParams.get('redirect_uri')!);
+        callback.searchParams.set('code', 'test-code');
+        callback.searchParams.set('state', 'forged');
+        expect((await fetch(callback)).status).toBe(400);
+        callback.searchParams.set('state', url.searchParams.get('state')!);
+        expect((await fetch(callback, { method: 'POST' })).status).toBe(405);
+        expect((await fetch(callback)).status).toBe(200);
+      } });
+    expect(await auth.signIn()).toBe('harold@filmkraft.tv');
+  });
+
+  it('closes the callback listener when opening the browser fails', async () => {
+    let redirect = '';
+    const auth = new GoogleAuth({ clientId: 'desktop-client-id', tokenStore: new MemoryGoogleTokenStore(),
+      openBrowser: value => { redirect = new URL(value).searchParams.get('redirect_uri')!; throw new Error('No default browser'); } });
+    await expect(auth.signIn()).rejects.toThrow('No default browser');
+    await expect(fetch(redirect)).rejects.toThrow();
+  });
+
   it('uses a loopback PKCE login and a separate drive.file-only Picker request', async () => {
     const seenScopes: string[][] = [];
     const tokenStore = new MemoryGoogleTokenStore();

@@ -13,11 +13,14 @@ const UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3/files';
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const PNG_MIME = 'image/png';
 const UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
-const GOOGLE_FILE_FIELDS = 'id,name,mimeType,parents,size,md5Checksum,webViewLink,driveId,isAppAuthorized,appProperties,capabilities(canEdit,canAddChildren,canListChildren)';
+const GOOGLE_FILE_FIELDS = 'id,name,mimeType,parents,trashed,size,md5Checksum,webViewLink,driveId,isAppAuthorized,appProperties,capabilities(canEdit,canAddChildren,canListChildren)';
 const UPLOAD_MARKER = 'stillsLibraryUploadId';
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+let sheetRequestQueue: Promise<void> = Promise.resolve();
+let nextSheetRequest = 0;
 
 export interface GoogleWorkspaceOptions {
+  interactive?: boolean;
   auth: GoogleAuth;
   fetchImpl?: typeof fetch;
   /** Overrides may be saved after a user picks a replacement Sheet or destination folder. */
@@ -42,6 +45,41 @@ function driveLiteral(value: string): string {
 }
 
 function collisionKey(name: string): string { return name.normalize('NFC').toLocaleLowerCase('en-US'); }
+
+function isTrashed(file: DriveFile): boolean {
+  return (file as DriveFile & { trashed?: boolean }).trashed === true;
+}
+
+function validateVersionName(name: string): void {
+  if (!name.trim() || name === '.' || name === '..' || /[/\\\u0000-\u001f\u007f]/.test(name)) {
+    throw new Error('Version destination requires a plain folder name.');
+  }
+}
+
+function assertVersionParent(folder: DriveFile, projectFolderId: string): void {
+  if (folder.id !== projectFolderId || folder.mimeType !== FOLDER_MIME || isTrashed(folder)) {
+    throw new GoogleConflictError('The project destination is no longer an available folder. Delivery is paused.');
+  }
+}
+
+function assertVersionFolder(folder: DriveFile, projectFolderId: string, versionName: string, folderId: string): void {
+  if (!folderId || folder.id !== folderId || folder.mimeType !== FOLDER_MIME || folder.name !== versionName
+      || isTrashed(folder) || folder.parents?.length !== 1 || folder.parents[0] !== projectFolderId) {
+    throw new GoogleConflictError('Saved version destination is no longer the exact folder inside this project. Delivery is paused.');
+  }
+}
+
+function uniqueVersionFolder(files: DriveFile[], versionName: string): DriveFile | undefined {
+  const matches = files.filter(file => !isTrashed(file) && collisionKey(file.name) === collisionKey(versionName));
+  if (matches.some(file => file.name !== versionName)) {
+    throw new GoogleConflictError(`The project already contains a case or Unicode variant of ${versionName}.`);
+  }
+  if (matches.length > 1) throw new GoogleConflictError(`Multiple destination items named ${versionName}; resolve the ambiguity before delivery.`);
+  if (matches[0] && matches[0].mimeType !== FOLDER_MIME) {
+    throw new GoogleConflictError(`Destination item ${versionName} exists but is not a folder.`);
+  }
+  return matches[0];
+}
 
 function requiresPicker(error: unknown): boolean {
   return error instanceof GoogleApiError && (error.status === 403 || error.status === 404);
@@ -87,8 +125,12 @@ export class GoogleWorkspace {
   readonly sources: SourceConfigs;
   private readonly auth: GoogleAuth;
   private readonly fetchImpl: typeof fetch;
+  private readonly interactive: boolean;
+  private readonly paceRequests: boolean;
 
   constructor(options: GoogleWorkspaceOptions) {
+    this.interactive = options.interactive !== false;
+    this.paceRequests = !options.fetchImpl;
     this.auth = options.auth;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.sources = options.sources ?? SOURCE_CONFIG;
@@ -104,10 +146,27 @@ export class GoogleWorkspace {
     const endpoint = checkGoogleUrl(String(url)).toString();
     const headers = new Headers(init.headers);
     headers.set('Authorization', `Bearer ${await this.auth.getAccessToken()}`);
-    const response = await this.fetchImpl(endpoint, { ...init, headers });
+    const send = async () => {
+      if (this.paceRequests && new URL(endpoint).hostname === 'sheets.googleapis.com') {
+        sheetRequestQueue = sheetRequestQueue.catch(() => {}).then(async () => {
+          const delay = nextSheetRequest - Date.now();
+          if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+          nextSheetRequest = Date.now() + 1300;
+        });
+        await sheetRequestQueue;
+      }
+      return this.fetchImpl(endpoint, { ...init, headers, signal: init.signal ?? AbortSignal.timeout(60_000) });
+    };
+    let response = await send();
+    for (let attempt = 0; this.paceRequests && response.status === 429 && attempt < 3; attempt++) {
+      const retrySeconds = Number(response.headers.get('retry-after')) || 30;
+      await response.arrayBuffer();
+      await new Promise(resolve => setTimeout(resolve, Math.min(60, Math.max(30, retrySeconds)) * 1000));
+      response = await send();
+    }
     if (response.status !== 401) return response;
     headers.set('Authorization', `Bearer ${await this.auth.getAccessToken(true)}`);
-    return this.fetchImpl(endpoint, { ...init, headers });
+    return send();
   }
 
   private async json<T>(url: string | URL, init: RequestInit = {}): Promise<T> {
@@ -174,9 +233,76 @@ export class GoogleWorkspace {
   }
 
   /** Re-reads A:B immediately before changing B, and confirms the write afterward. */
+  async getStatusSchema(): Promise<unknown[]> {
+    const result: unknown[] = [];
+    for (const key of sourceKeys()) result.push({ source: key, schema: await this.json(`${SHEETS_BASE}/${encodeURIComponent(this.source(key).spreadsheetId)}?fields=spreadsheetUrl,sheets(properties,tables)`) });
+    return result;
+  }
+
+  async ensureReviewedStatusOptions(): Promise<string[]> {
+    const updated: string[] = [];
+    for (const key of sourceKeys()) {
+      const base = `${SHEETS_BASE}/${encodeURIComponent(this.source(key).spreadsheetId)}`;
+      type Rule = { condition: { type: string; values?: { userEnteredValue: string }[] }; strict?: boolean; showCustomUi?: boolean; inputMessage?: string };
+      type Table = { tableId: string; range: { startRowIndex?: number; endRowIndex: number; startColumnIndex?: number; endColumnIndex: number }; columnProperties?: { columnIndex: number; columnType?: string; dataValidationRule?: Rule; [key: string]: unknown }[] };
+      type Sheet = { properties: { sheetId: number; title: string; gridProperties: { rowCount: number } }; tables?: Table[]; data?: { startRow?: number; rowData?: { values?: { dataValidation?: Rule }[] }[] }[] };
+      const metadata = await this.json<{ sheets: Sheet[] }>(`${base}?fields=spreadsheetUrl,sheets(properties,tables)`);
+      const sheet = metadata.sheets.find(s => s.properties.title === 'Stills');
+      if (!sheet) throw new Error(`${key}: Stills tab is missing.`);
+      const count = sheet.properties.gridProperties.rowCount;
+      const headers = await this.json<SheetValues>(`${base}/values/${encodeURIComponent('Stills!A1:B1')}`);
+      if (headers.values?.[0]?.[0] !== 'Project' || headers.values?.[0]?.[1] !== 'Status') throw new Error(`${key}: unexpected Stills headers.`);
+      const url = new URL(base);
+      url.searchParams.set('ranges', `Stills!B2:B${count}`);
+      url.searchParams.set('fields', 'sheets(data(startRow,rowData(values(dataValidation))))');
+      const cells = await this.json<{ sheets: Sheet[] }>(url);
+      const rules = new Map<number, Rule>();
+      for (const block of cells.sheets[0]?.data ?? []) for (const [i, row] of (block.rowData ?? []).entries()) {
+        const rule = row.values?.[0]?.dataValidation;
+        if (rule) rules.set((block.startRow ?? 1) + i, rule);
+      }
+      const requests: unknown[] = [];
+      const tableRows = new Set<number>();
+      for (const table of sheet.tables ?? []) {
+        const offset = table.range.startColumnIndex ?? 0;
+        if (offset > 1 || table.range.endColumnIndex <= 1) continue;
+        const columns = structuredClone(table.columnProperties ?? []);
+        const column = columns.find(c => c.columnIndex === 1 - offset);
+        if (column?.columnType !== 'DROPDOWN' || column.dataValidationRule?.condition.type !== 'ONE_OF_LIST') throw new Error(`${key}: Stills status table column is not a list dropdown.`);
+        for (let row = Math.max(1, (table.range.startRowIndex ?? 0) + 1); row < table.range.endRowIndex; row++) tableRows.add(row);
+        if (!column.dataValidationRule.condition.values?.some(v => v.userEnteredValue === 'Reviewed')) {
+          column.dataValidationRule.condition.values = [...(column.dataValidationRule.condition.values ?? []), { userEnteredValue: 'Reviewed' }];
+          requests.push({ updateTable: { table: { tableId: table.tableId, columnProperties: columns }, fields: 'columnProperties' } });
+        }
+      }
+      for (let row = 1; row < count; row++) {
+        if (tableRows.has(row)) continue;
+        const rule = rules.get(row);
+        if (rule && rule.condition.type !== 'ONE_OF_LIST') throw new Error(`${key}: status validation uses ${rule.condition.type}; preserve it for manual migration.`);
+        if (rule?.condition.values?.some(v => v.userEnteredValue === 'Reviewed')) continue;
+        const next: Rule = rule ? structuredClone(rule) : { condition: { type: 'ONE_OF_LIST', values: ['To Do', 'In Process', 'Done', 'Skip'].map(userEnteredValue => ({ userEnteredValue })) }, strict: true, showCustomUi: true };
+        next.condition.values = [...(next.condition.values ?? []), { userEnteredValue: 'Reviewed' }];
+        requests.push({ setDataValidation: { range: { sheetId: sheet.properties.sheetId, startRowIndex: row, endRowIndex: row + 1, startColumnIndex: 1, endColumnIndex: 2 }, rule: next } });
+      }
+      if (requests.length) await this.json(`${base}:batchUpdate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requests }) });
+      const verified = await this.json<{ sheets: Sheet[] }>(url);
+      const verifiedRules = new Map<number, Rule>();
+      for (const block of verified.sheets[0]?.data ?? []) for (const [i, row] of (block.rowData ?? []).entries()) if (row.values?.[0]?.dataValidation) verifiedRules.set((block.startRow ?? 1) + i, row.values[0].dataValidation!);
+      for (let row = 1; row < count; row++) if (!tableRows.has(row) && !verifiedRules.get(row)?.condition.values?.some(v => v.userEnteredValue === 'Reviewed')) throw new Error(`${key}: Reviewed dropdown verification failed at row ${row + 1}.`);
+      const after = await this.json<{ sheets: Sheet[] }>(`${base}?fields=spreadsheetUrl,sheets(properties,tables)`);
+      for (const table of sheet.tables ?? []) {
+        if (!tableRows.has((table.range.startRowIndex ?? 0) + 1)) continue;
+        const column = after.sheets.find(s => s.properties.title === 'Stills')?.tables?.find(t => t.tableId === table.tableId)?.columnProperties?.find(c => c.columnIndex === 1 - (table.range.startColumnIndex ?? 0));
+        if (!column?.dataValidationRule?.condition.values?.some(v => v.userEnteredValue === 'Reviewed')) throw new Error(`${key}: Reviewed table dropdown verification failed.`);
+      }
+      updated.push(key);
+    }
+    return updated;
+  }
+
   async updateStatus(project: ProjectRow, nextStatus: ProjectStatus, expectedStatus = project.status): Promise<ProjectRow> {
     if (!Number.isSafeInteger(project.rowNumber) || project.rowNumber < 2 || !project.name.trim()) throw new Error('Invalid Stills project row.');
-    if (!(['To Do', 'In Process', 'Done', 'Skip'] as string[]).includes(nextStatus)) throw new Error(`Invalid status ${nextStatus}.`);
+    if (!(['To Do', 'In Process', 'Done', 'Reviewed', 'Skip'] as string[]).includes(nextStatus)) throw new Error(`Invalid status ${nextStatus}.`);
     const config = this.source(project.source);
     const readUrl = `${SHEETS_BASE}/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(`Stills!A${project.rowNumber}:B${project.rowNumber}`)}?valueRenderOption=FORMATTED_VALUE`;
     const before = await this.json<SheetValues>(readUrl);
@@ -255,6 +381,7 @@ export class GoogleWorkspace {
     let folder = await this.getFile(folderId);
     if (folder.mimeType !== FOLDER_MIME) throw new GoogleApiError('Destination item is not a folder.', 422, 'not_a_folder');
     if (folder.isAppAuthorized === false) {
+      if (!this.interactive) throw new Error(`Google Picker access is required for ${folder.name}. Sign in and grant folder access before retrying this project.`);
       await this.auth.pickFiles({ fileIds: [folderId], allowFolders: true });
       folder = await this.getFile(folderId);
       assertAppAuthorized(folder);
@@ -363,6 +490,7 @@ export class GoogleWorkspace {
       throw new GoogleApiError(`Choose the destination year before creating a folder for ${name}.`, 422, 'destination_year_required');
     }
     const target = yearFolders.filter(item => item.name === chosenYear);
+    if (!target.length && stills.name === '01_Stills') target.push(await this.ensureVersionDestination(stills.id, chosenYear));
     if (target.length !== 1) throw new GoogleConflictError(`Expected exactly one ${chosenYear} folder inside 01_Stills.`);
     const parentId = target[0].id;
     await this.ensureFolderAuthorized(parentId);
@@ -380,14 +508,112 @@ export class GoogleWorkspace {
     return created;
   }
 
+  /** Reuse or create one exact creative-version child without altering existing items. */
+  async ensureVersionDestination(projectFolderId: string, versionName: string): Promise<DriveFile> {
+    validateVersionName(versionName);
+    const parent = await this.ensureFolderAuthorized(projectFolderId);
+    assertVersionParent(parent, projectFolderId);
+    const existing = uniqueVersionFolder(await this.listFolderFiles(projectFolderId), versionName);
+    if (existing) return this.verifyVersionDestination(projectFolderId, versionName, existing.id);
+    const url = new URL(DRIVE_BASE);
+    url.searchParams.set('fields', GOOGLE_FILE_FIELDS);
+    url.searchParams.set('supportsAllDrives', 'true');
+    const created = await this.json<DriveFile>(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: versionName, mimeType: FOLDER_MIME, parents: [projectFolderId] }),
+    });
+    assertVersionFolder(created, projectFolderId, versionName, created.id);
+    // Re-list after creation so a concurrent creator cannot silently produce an
+    // ambiguous destination. Leave all folders intact if the check fails.
+    return this.verifyVersionDestination(projectFolderId, versionName, created.id);
+  }
+
+  /** Recheck a saved child and its uniqueness; never create a replacement. */
+  async verifyVersionDestination(projectFolderId: string, versionName: string, folderId: string): Promise<DriveFile> {
+    validateVersionName(versionName);
+    const parent = await this.ensureFolderAuthorized(projectFolderId);
+    assertVersionParent(parent, projectFolderId);
+    const folder = await this.getFile(folderId);
+    assertVersionFolder(folder, projectFolderId, versionName, folderId);
+    const authorized = await this.ensureFolderAuthorized(folderId);
+    assertVersionFolder(authorized, projectFolderId, versionName, folderId);
+    const unique = uniqueVersionFolder(await this.listFolderFiles(projectFolderId), versionName);
+    if (!unique || unique.id !== folderId) {
+      throw new GoogleConflictError('Saved version destination is no longer the unique exact child of this project. Delivery is paused.');
+    }
+    assertVersionFolder(unique, projectFolderId, versionName, folderId);
+    return authorized;
+  }
+
   async verifyUploadedPng(fileId: string, folderId: string, fileName: string, localMd5: string, localSize: number, uploadId: string): Promise<DriveFile> {
     const file = await this.getFile(fileId);
-    if (file.name !== fileName || file.mimeType !== PNG_MIME || !file.parents?.includes(folderId)
+    if (isTrashed(file) || file.name !== fileName || file.mimeType !== PNG_MIME || !file.parents?.includes(folderId)
         || file.size !== String(localSize) || file.md5Checksum?.toLowerCase() !== localMd5.toLowerCase()
         || file.appProperties?.[UPLOAD_MARKER] !== uploadId) {
       throw new GoogleApiError(`Uploaded PNG ${fileName} failed Drive metadata verification.`, 502, 'upload_verification_failed');
     }
     return file;
+  }
+
+  async relocateVerifiedPng(fileId: string, previous: string, destination: string, name: string, md5: string, size: number, uploadId: string): Promise<void> {
+    const file = await this.getFile(fileId);
+    // An interrupted move may have succeeded remotely before the local journal saved.
+    if (file.parents?.length === 1 && file.parents[0] === destination) {
+      await this.verifyUploadedPng(fileId, destination, name, md5, size, uploadId);
+      return;
+    }
+    await this.verifyUploadedPng(fileId, previous, name, md5, size, uploadId);
+    if (isTrashed(file) || file.parents?.length !== 1) throw new Error('Unexpected PNG parent or trash state.');
+    await this.ensureFolderAuthorized(destination);
+    if ((await this.listFolderFiles(destination)).some(item => collisionKey(item.name) === collisionKey(name))) throw new Error(`Destination already contains ${name}.`);
+    const url = new URL(`${DRIVE_BASE}/${encodeURIComponent(fileId)}`);
+    url.searchParams.set('addParents', destination);
+    url.searchParams.set('removeParents', previous);
+    url.searchParams.set('supportsAllDrives', 'true');
+    url.searchParams.set('fields', GOOGLE_FILE_FIELDS);
+    await this.json<DriveFile>(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    await this.verifyUploadedPng(fileId, destination, name, md5, size, uploadId);
+  }
+
+  /** Revision operations are restricted to a checksum-verified app-owned PNG. */
+  async reviseVerifiedPng(fileId: string, folderId: string, previousName: string, nextName: string | null, md5: string, size: number, uploadId: string, previousAliases: string[] = []): Promise<void> {
+    const file = await this.getFile(fileId);
+    if (file.mimeType !== PNG_MIME || file.parents?.length !== 1 || file.parents[0] !== folderId
+        || file.size !== String(size) || file.md5Checksum?.toLowerCase() !== md5.toLowerCase()
+        || file.appProperties?.[UPLOAD_MARKER] !== uploadId) throw new Error('Revision file ownership or contents changed.');
+    if (nextName === null && isTrashed(file)) return;
+    if (isTrashed(file) || (file.name !== previousName && file.name !== nextName && !previousAliases.includes(file.name))) throw new Error('Revision filename or trash state changed.');
+    if (nextName === file.name) return;
+    if (nextName && (!nextName.endsWith('.png') || /[\\/]/.test(nextName))) throw new Error('Invalid revision filename.');
+    if (nextName && (await this.listFolderFiles(folderId)).some(other => other.id !== fileId && collisionKey(other.name) === collisionKey(nextName))) throw new GoogleConflictError(`Destination already contains ${nextName}.`);
+    const url = new URL(`${DRIVE_BASE}/${encodeURIComponent(fileId)}`);
+    url.searchParams.set('supportsAllDrives', 'true');
+    url.searchParams.set('fields', GOOGLE_FILE_FIELDS);
+    await this.json<DriveFile>(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(nextName === null ? { trashed: true } : { name: nextName }) });
+    const updated = await this.getFile(fileId);
+    if (updated.mimeType !== PNG_MIME || updated.parents?.length !== 1 || updated.parents[0] !== folderId
+        || updated.size !== String(size) || updated.md5Checksum?.toLowerCase() !== md5.toLowerCase()
+        || updated.appProperties?.[UPLOAD_MARKER] !== uploadId
+        || (nextName === null ? !isTrashed(updated) : updated.name !== nextName || isTrashed(updated))) throw new Error('Drive revision verification failed.');
+  }
+
+  /** Trash only an empty, previously verified delivery subfolder. Never recurse. */
+  async trashEmptyDeliveryFolder(id: string, parentId: string, name: string): Promise<boolean> {
+    const file = await this.getFile(id);
+    const matches = (item: DriveFile) => item.id === id && item.name === name && item.mimeType === FOLDER_MIME
+      && item.parents?.length === 1 && item.parents[0] === parentId;
+    if (!matches(file)) throw new Error('Delivery folder identity or parent changed; cleanup stopped.');
+    if (isTrashed(file)) return true;
+    if ((await this.listFolderFiles(id)).length) return false;
+    const url = new URL(`${DRIVE_BASE}/${encodeURIComponent(id)}`);
+    url.searchParams.set('supportsAllDrives', 'true');
+    url.searchParams.set('fields', GOOGLE_FILE_FIELDS);
+    await this.json<DriveFile>(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) });
+    const updated = await this.getFile(id);
+    if (!matches(updated) || !isTrashed(updated)) throw new Error('Drive folder cleanup verification failed.');
+    return true;
   }
 
   /** Creates a new PNG only; an existing same-name item causes a conflict. */

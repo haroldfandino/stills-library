@@ -81,6 +81,13 @@ def main() -> int:
         if '"-filter_script:v"' in core_source.read_text(encoding="utf-8"):
             raise ValueError("Extract Stills still uses FFmpeg's removed -filter_script:v option. "
                              "Apply patches/extract-stills-ffmpeg9.patch to that checkout first.")
+        if "cv2.imwrite(str(path), frame" in core_source.read_text(encoding="utf-8"):
+            raise ValueError("Extract Stills still uses preview file APIs that fail for Unicode Windows paths. "
+                             "Apply patches/extract-stills-unicode-paths.patch to that checkout first.")
+        if 'str(directory).replace("%", "%%")' not in core_source.read_text(encoding="utf-8"):
+            raise ValueError("Apply patches/extract-stills-percent-paths.patch before building.")
+        if 'recognition_error=str(error)' not in (extract_root / 'stills_tool' / 'text_ocr.py').read_text(encoding='utf-8'):
+            raise ValueError("Apply patches/extract-stills-degenerate-text.patch before building.")
         if not rename_source.is_file() or rename_source.name != "rename_stills.py":
             raise ValueError(f"Missing original Rename Stills script: {rename_source}")
         run([sys.executable, "-m", "PyInstaller", "--version"])

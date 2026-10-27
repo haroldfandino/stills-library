@@ -4,10 +4,14 @@ Stills Library uses its own Google OAuth session. The `harold@filmkraft.tv` conn
 
 ## Google Cloud project
 
-1. Create or select a Google Cloud project for Stills Library. Enable **Google Sheets API**, **Google Drive API**, and **Google Picker API**.g
+1. Create or select a Google Cloud project for Stills Library. Enable **Google Sheets API**, **Google Drive API**, and **Google Picker API**.
 2. Configure the OAuth consent screen. For a single-operator pilot, keep the app in testing and add `harold@filmkraft.tv` as a test user if the app is external. If it is an internal Workspace app, configure the organization's access policy accordingly.
 3. Add `openid`, `email`, `https://www.googleapis.com/auth/drive.file`, and `https://www.googleapis.com/auth/drive.metadata.readonly` to the consent configuration. The metadata scope lets the app enumerate existing folders and names before creating files; a token without it is rejected to prevent missed collisions. This is a restricted Drive scope and may require Google verification or administrator approval for broader distribution.
-4. Create an OAuth client of type **Desktop app**. Use a separate desktop client ID for macOS and Windows if deploying on both platforms. Copy its `*.apps.googleusercontent.com` **client ID** into the app's Setup screen or run `npm run cli -- configure-google CLIENT_ID`. Do not use a Web application client ID.
+4. Create an OAuth client of type **Desktop app**. Use a separate desktop client ID for macOS and Windows if deploying on both platforms. Download its JSON and choose **Import OAuth JSON** in Setup, or run `npm run cli -- import-google "C:\path\to\client.json"`. The app accepts only the `installed` Desktop format and stores the client configuration using the operating system's encrypted storage. The optional desktop client secret is included in token exchanges and refreshes, never in browser URLs or CLI output. You can also paste the `*.apps.googleusercontent.com` client ID into Setup or run `npm run cli -- configure-google CLIENT_ID`. Do not use a Web application client ID or service-account key.
+
+Download credentials outside the repository. Never commit credentials or tokens. **Sign out** in Setup (or `npm run cli -- logout`) removes this computer's saved login; the client configuration remains available for signing in again.
+
+Protocol references: [Google Desktop OAuth](https://developers.google.com/identity/protocols/oauth2/native-app) and [Desktop Google Picker](https://developers.google.com/workspace/drive/picker/guides/desktop-mobile-picker).
 
 The app opens Google authorization in the system browser and receives the result on a temporary `127.0.0.1` loopback listener using PKCE. Sign in as `harold@filmkraft.tv`; another account is rejected. Refresh tokens are stored through Electron's OS-protected storage. Each Google Picker request uses `drive.file` alone, as Google requires for the desktop Picker flow.
 

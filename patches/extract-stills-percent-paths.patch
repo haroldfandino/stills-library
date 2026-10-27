@@ -1,0 +1,31 @@
+--- a/stills_tool/core.py
++++ b/stills_tool/core.py
+@@ -1082,7 +1082,7 @@
+         codec_options = ["-q:v", "2", "-pix_fmt", "yuvj444p"]
+     elif options.format == "tiff":
+         codec_options = ["-compression_algo", "deflate"]
+-    pattern = str(directory / f".export_%06d.{extension}")
++    pattern = str(directory).replace("%", "%%") + os.sep + f".export_%06d.{extension}"
+     _progress(progress, "Exporting original-resolution stills", 0, len(requested))
+     try:
+         _run([find_tool("ffmpeg"), "-v", "error", "-nostdin", "-i", str(source),
+--- a/tests/test_core.py
++++ b/tests/test_core.py
+@@ -524,3 +524,17 @@
+     summary = json.loads((directory / "scores.json").read_text())
+     assert summary["selected_ids"] == [2]
+     assert [row["selected"] for row in summary["candidates"]] == [False, True]
++
++
++def test_percent_paths_export_multiple_frames(tmp_path, ffmpeg):
++    directory = tmp_path / "offer 42%"
++    directory.mkdir()
++    frames = patterned_frames(9)
++    source = encode(ffmpeg, directory / "50% source.mkv", frames)
++    before = source.read_bytes()
++    analysis = analysis_for(source, directory / "analysis", [0, 4, 8])
++    result = core.export_analysis(analysis, Options(output=directory / "export 20%"))
++    assert len(result["files"]) == 3
++    for item in result["files"]:
++        np.testing.assert_allclose(read_pixels(item["path"]), frames[item["frame_index"]], atol=1)
++    assert source.read_bytes() == before

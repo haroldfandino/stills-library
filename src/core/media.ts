@@ -27,6 +27,9 @@ export interface VideoCandidate {
   voiceover: Voiceover;
   declaredDurationSec: number | null;
   probeError?: string;
+  createdAt?: string;
+  fileCreatedAt?: string;
+  fileModifiedAt?: string;
 }
 
 export interface VideoDiscovery {
@@ -39,6 +42,7 @@ export interface VideoDiscovery {
 export interface DiscoverOptions {
   sourceRoot: string;
   projectCode: string;
+  projectName?: string;
   ffprobePath?: string;
 }
 
@@ -60,46 +64,62 @@ function folderCode(folderName: string): string | null {
 }
 
 async function directoryExists(folder: string): Promise<boolean> {
-  try { return (await stat(folder)).isDirectory(); } catch { return false; }
+  try { return (await stat(folder)).isDirectory(); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
 }
 
 async function childDirectory(parent: string, wanted: string): Promise<string | null> {
   let entries;
   try { entries = await readdir(parent, { withFileTypes: true }); }
-  catch { return null; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
   const entry = entries.find(item => item.isDirectory() && item.name.toLowerCase() === wanted.toLowerCase());
   return entry ? path.join(parent, entry.name) : null;
 }
 
 /** Match the bracketed project code, never a substring of a client name. */
-export async function findProjectFolder(sourceRoot: string, projectCode: string): Promise<string | null> {
-  const code = normalizeProjectCode(projectCode);
+export async function findProjectFolder(sourceRoot: string, projectCode?: string, projectName?: string): Promise<string | null> {
+  const code = projectCode ? normalizeProjectCode(projectCode) : undefined;
+  const normalized = (name: string) => name.replace(/^\[[^\]]+\]/, '').replace(/[^\p{L}\p{N}]+/gu, '').toLowerCase();
+  if (!code && !projectName) throw new Error('A project code or name is required.');
   const root = path.resolve(sourceRoot);
-  if (!await directoryExists(root)) return null;
-  if (folderCode(path.basename(root)) === code) return root;
-  const active = await childDirectory(root, '01_ActiveProjects');
-  if (!active) return null;
+  if (!(await stat(root)).isDirectory()) throw new Error('The configured source mount is unavailable.');
+  if (code && folderCode(path.basename(root)) === code) return root;
   const matches: string[] = [];
-  const inspect = async (folder: string): Promise<void> => {
+  const inspect = async (folder: string, depth: number): Promise<void> => {
     const entries = await readdir(folder, { withFileTypes: true });
     for (const item of entries) {
-      if (item.isDirectory() && folderCode(item.name) === code) matches.push(path.join(folder, item.name));
+      if (!item.isDirectory() || item.name.startsWith('.')) continue;
+      const full = path.join(folder, item.name);
+      const foundCode = folderCode(item.name);
+      if ((code && foundCode === code) || (!code && normalized(item.name) === normalized(projectName!))) matches.push(full);
+      else if (!foundCode && !item.name.startsWith('_') && !/^\d{2}[_ -](?:FINAL|VIDEOS|ASSETS|FOOTAGE|AUDIO)/i.test(item.name) && depth < 3) await inspect(full, depth + 1);
     }
   };
-  await inspect(active);
-  // Some active-project roots divide projects by year.
-  const entries = await readdir(active, { withFileTypes: true });
-  for (const entry of entries) {
-    if (entry.isDirectory() && /^20\d\d$/.test(entry.name)) await inspect(path.join(active, entry.name));
+  if (/^0[123][_-](?:Active|Archived)Projects(?:_Screenbridge)?$/i.test(path.basename(root))) await inspect(root, 0);
+  for (const name of ['01_ActiveProjects', '02_ArchivedProjects', '02_ActiveProjects', '03_ArchivedProjects', '02_ActiveProjects_Screenbridge', '03_ArchivedProjects_Screenbridge']) {
+    const collection = await childDirectory(root, name);
+    if (collection) await inspect(collection, 0);
   }
-  if (matches.length > 1) throw new Error(`Multiple folders match [${code}]: ${matches.join(', ')}`);
+  if (matches.length > 1 && projectName) {
+    const exact = matches.filter(file => normalized(path.basename(file)) === normalized(projectName));
+    if (exact.length === 1) return exact[0];
+    // Sheet titles sometimes append a delivery type to the source folder name.
+    const prefix = matches.filter(file => normalized(path.basename(file)).length > 8
+      && normalized(projectName).startsWith(normalized(path.basename(file))));
+    if (prefix.length === 1) return prefix[0];
+  }
+  if (matches.length > 1) throw new Error(`Multiple folders match ${code ?? projectName}: ${matches.join(', ')}`);
   return matches[0] ?? null;
 }
 
 async function findDeliveryFolder(projectFolder: string): Promise<string | null> {
   const finalDelivery = await childDirectory(projectFolder, '11_FINAL_DELIVERY');
-  if (!finalDelivery) return null;
-  return childDirectory(finalDelivery, '01_VIDEOS');
+  if (finalDelivery) {
+    const videos = await childDirectory(finalDelivery, '01_VIDEOS');
+    if (videos) return videos;
+  }
+  const legacy = await childDirectory(projectFolder, '03_FINAL_DELIVERY');
+  const client = legacy ? await childDirectory(legacy, '03_CLIENT_DELIVERY') : null;
+  return client ? childDirectory(client, '04_VIDEOS') : null;
 }
 
 async function listVideoFiles(folder: string): Promise<string[]> {
@@ -166,15 +186,15 @@ function classifyVoiceover(relativePath: string): Voiceover {
 }
 
 interface ProbeJson {
-  streams?: Array<{ codec_name?: string; width?: number; height?: number; duration?: string; side_data_list?: Array<{rotation?: number}> }>;
-  format?: { duration?: string };
+  streams?: Array<{ codec_name?: string; width?: number; height?: number; duration?: string; tags?: { creation_time?: string }; side_data_list?: Array<{rotation?: number}> }>;
+  format?: { duration?: string; tags?: { creation_time?: string } };
 }
 
-async function probeVideo(file: string, ffprobePath: string): Promise<{ durationSec: number; width: number; height: number; codec: string }> {
+async function probeVideo(file: string, ffprobePath: string): Promise<{ durationSec: number; width: number; height: number; codec: string; createdAt?: string }> {
   const { stdout } = await execFileAsync(ffprobePath, [
     '-v', 'error', '-select_streams', 'v:0', '-show_entries',
-    'stream=codec_name,width,height,duration:stream_side_data=rotation:format=duration', '-of', 'json', file,
-  ], { maxBuffer: 1024 * 1024, timeout: 30_000 });
+    'stream=codec_name,width,height,duration:stream_tags=creation_time:stream_side_data=rotation:format=duration:format_tags=creation_time', '-of', 'json', file,
+  ], { maxBuffer: 1024 * 1024, timeout: 30_000, windowsHide: true });
   const data = JSON.parse(stdout) as ProbeJson;
   const stream = data.streams?.[0];
   if (!stream) throw new Error('No video stream');
@@ -186,7 +206,8 @@ async function probeVideo(file: string, ffprobePath: string): Promise<{ duration
   if (!Number.isFinite(durationSec) || durationSec <= 0 || width <= 0 || height <= 0) {
     throw new Error('Incomplete video duration or dimensions');
   }
-  return { durationSec, width, height, codec: stream.codec_name || 'unknown' };
+  return { durationSec, width, height, codec: stream.codec_name || 'unknown',
+    createdAt: data.format?.tags?.creation_time || stream.tags?.creation_time };
 }
 
 function durationRank(video: VideoCandidate): number {
@@ -242,7 +263,7 @@ export function selectVideoDefaults(videos: VideoCandidate[], projectCode?: stri
 
 export async function discoverProjectVideos(options: DiscoverOptions): Promise<VideoDiscovery> {
   const code = normalizeProjectCode(options.projectCode);
-  const projectFolder = await findProjectFolder(options.sourceRoot, code);
+  const projectFolder = await findProjectFolder(options.sourceRoot, code, options.projectName);
   if (!projectFolder) return { projectFolder: null, deliveryFolder: null, videos: [], warnings: [`Project folder [${code}] was not found.`] };
   return discoverProjectFolderVideos({ projectFolder, projectCode: code, ffprobePath: options.ffprobePath });
 }
@@ -256,7 +277,7 @@ export async function discoverProjectFolderVideos(options: DiscoverProjectFolder
   const projectFolder = await realpath(selected);
   const code = options.projectCode ? normalizeProjectCode(options.projectCode) : folderCode(path.basename(projectFolder));
   const deliveryFolder = await findDeliveryFolder(projectFolder);
-  if (!deliveryFolder) return { projectFolder, deliveryFolder: null, videos: [], warnings: ['11_FINAL_DELIVERY/01_VIDEOS was not found.'] };
+  if (!deliveryFolder) return { projectFolder, deliveryFolder: null, videos: [], warnings: ['No supported client delivery video folder was found.'] };
   const warnings: string[] = [];
   let paths = await listVideoFiles(deliveryFolder);
   if (code === '1289') {
@@ -279,6 +300,9 @@ export async function discoverProjectFolderVideos(options: DiscoverProjectFolder
         voiceover: classifyVoiceover(relativePath), declaredDurationSec: namedDuration(name),
       };
       try {
+        const info = await stat(file);
+        base.fileCreatedAt = info.birthtimeMs > 0 ? info.birthtime.toISOString() : undefined;
+        base.fileModifiedAt = info.mtimeMs > 0 ? info.mtime.toISOString() : undefined;
         const probe = await probeVideo(file, options.ffprobePath ?? 'ffprobe');
         results[index] = { ...base, ...probe, aspect: classifyAspect(probe.width, probe.height, name) };
       } catch (error) {

@@ -17,18 +17,19 @@ module.exports = {
     asar: true,
     appBundleId: 'tv.filmkraft.stills-library',
     executableName: 'Stills Library',
+    icon: process.platform === 'win32' ? path.join(__dirname, 'assets', 'stills-library.ico') : undefined,
     extendInfo: { LSMinimumSystemVersion: '15.0' },
     // Process and renderer output is bundled into dist/. The native sidecar and
     // CLI launcher are copied once through extraResource, outside app.asar.
     ignore: [
       /^\/(?:build|native|out|src|tests|scripts|docs|patches|bin|node_modules)(?:\/|$)/,
-      /^\/(?:README\.md|description\.md|forge\.config\.cjs|tsconfig\.json|vite\.config\.ts|vitest\.config\.ts)$/,
+      /^\/(?:README\.md|description\.md|forge\.config\.cjs|tsconfig\.json|vite\.config\.ts|vitest\.config\.ts)$/i,
     ],
     extraResource: [resources, path.join(__dirname, 'bin')],
   },
   makers: [
     { name: '@electron-forge/maker-dmg', platforms: ['darwin'] },
-    { name: '@electron-forge/maker-squirrel', platforms: ['win32'] },
+    { name: '@electron-forge/maker-squirrel', platforms: ['win32'], config: { setupIcon: path.join(__dirname, 'assets', 'stills-library.ico') } },
     { name: '@electron-forge/maker-zip', platforms: ['darwin', 'win32'] },
   ],
 };

@@ -1,8 +1,13 @@
 diff --git a/stills_tool/core.py b/stills_tool/core.py
+index fa723d8..6bb6082 100644
 --- a/stills_tool/core.py
 +++ b/stills_tool/core.py
-@@ -180,7 +180,7 @@ def _filter_file(directory, name, value):
+@@ -180,7 +180,7 @@ def color_filter(video, mode="srgb"):
+ def _filter_file(directory, name, value):
      path = Path(directory) / (name + ".filter")
      path.write_text(value, encoding="utf-8")
 -    return ["-filter_script:v", str(path)]
 +    return ["-/filter:v", str(path)]
+
+
+ def _make_run_dir(source, output):

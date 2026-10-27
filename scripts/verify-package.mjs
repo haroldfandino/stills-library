@@ -52,7 +52,7 @@ if (manifest.platform !== platform || manifest.arch !== arch) {
   throw new Error(`Wrong native sidecar architecture: ${manifest.platform}/${manifest.arch}`);
 }
 const asar = check(path.join(resources, 'app.asar'));
-const asarFiles = listPackage(asar);
+const asarFiles = listPackage(asar).map(file => file.replaceAll('\\', '/'));
 for (const required of ['/dist/main.cjs', '/dist/preload.cjs', '/dist/cli.cjs']) {
   if (!asarFiles.includes(required)) throw new Error(`Missing packaged process: ${required}`);
 }
@@ -117,8 +117,11 @@ if (platform === 'win32') {
 if (platform === 'darwin') env.PATH = '/usr/bin:/bin';
 else env.Path = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
 const command = platform === 'darwin' ? launcher : 'cmd.exe';
-const args = platform === 'darwin' ? ['--help'] : ['/d', '/c', `"${launcher}" --help`];
-const result = spawnSync(command, args, { encoding: 'utf8', env, timeout: 30000, windowsHide: true });
+// CMD interprets its command string again; putting an already quoted absolute
+// path inside spawn's quoting breaks paths such as "Stills Library".
+const args = platform === 'darwin' ? ['--help'] : ['/d', '/c', 'stills-library.cmd', '--help'];
+const result = spawnSync(command, args, { encoding: 'utf8', env, timeout: 30000, windowsHide: true,
+  cwd: platform === 'win32' ? path.dirname(launcher) : undefined });
 if (result.error) throw result.error;
 if (result.status !== 2 || !result.stderr.includes('Stills Library CLI')) {
   throw new Error(`Packaged CLI launcher failed: exit=${result.status}\n${result.stdout}\n${result.stderr}`);
@@ -159,6 +162,91 @@ if (platform === 'darwin' && process.env.STILLS_LIBRARY_SKIP_GUI_SMOKE !== '1') 
     }
     // Electron may finish a settings write just after receiving SIGTERM.
     fs.rmSync(folder, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+}
+if (platform === 'win32' && process.env.STILLS_LIBRARY_SKIP_GUI_SMOKE !== '1') {
+  // Observe the existing CLI launch function, so we can terminate only this
+  // isolated test's GUI after proving a fresh Windows named-pipe connection.
+  const temporaryRoot = path.resolve(os.tmpdir());
+  const folder = fs.mkdtempSync(path.join(temporaryRoot, 'stills-package-check-'));
+  const harness = path.join(folder, 'check-autolaunch.cjs');
+  const pidFile = path.join(folder, 'gui.pid');
+  const executable = path.join(packaged, 'Stills Library.exe');
+  fs.writeFileSync(harness, `
+const fs = require('node:fs');
+const cp = require('node:child_process');
+const spawn = cp.spawn;
+cp.spawn = function(command, args, options) {
+  const child = spawn(command, args, options);
+  if (command === process.env.STILLS_LIBRARY_APP_EXECUTABLE) {
+    child.once('spawn', () => fs.writeFileSync(process.env.STILLS_LIBRARY_TEST_PID, String(child.pid)));
+  }
+  return child;
+};
+process.argv = [process.execPath, process.env.STILLS_LIBRARY_TEST_CLI, 'status', '--json'];
+require(process.env.STILLS_LIBRARY_TEST_CLI);
+`);
+  try {
+    const status = spawnSync(executable, [harness], {
+      encoding: 'utf8', timeout: 40000, windowsHide: true,
+      env: {
+        ...env, ELECTRON_RUN_AS_NODE: '1', STILLS_LIBRARY_DATA_DIR: path.join(folder, 'data'),
+        STILLS_LIBRARY_APP_EXECUTABLE: executable,
+        STILLS_LIBRARY_TEST_CLI: path.join(resources, 'app.asar', 'dist', 'cli.cjs'),
+        STILLS_LIBRARY_TEST_PID: pidFile,
+      },
+    });
+    if (status.error) throw status.error;
+    if (status.status !== 0) throw new Error(`Windows CLI autolaunch failed: ${status.stderr || status.stdout}`);
+    const state = JSON.parse(status.stdout);
+    if (!state || typeof state !== 'object' || !Array.isArray(state.sessions) || state.authenticated !== false) {
+      throw new Error(`Windows CLI autolaunch returned an invalid isolated app state: ${status.stdout}`);
+    }
+    if (!fs.existsSync(pidFile)) throw new Error('Windows CLI did not launch the packaged GUI.');
+    const launchedPid = Number(fs.readFileSync(pidFile, 'utf8'));
+    if (!Number.isSafeInteger(launchedPid) || launchedPid <= 0) throw new Error('Windows CLI reported an invalid GUI PID.');
+    // A responding local service is insufficient: windowsHide can leave the
+    // newly launched GUI invisible until a second instance brings it forward.
+    // Inspect only this isolated test's recorded process, without focusing it.
+    const powershell = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const visibleWindow = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `
+$ErrorActionPreference = 'Stop'
+$timer = [Diagnostics.Stopwatch]::StartNew()
+while ($timer.ElapsedMilliseconds -lt 10000) {
+  $testProcess = Get-Process -Id ${launchedPid} -ErrorAction Stop
+  $testProcess.Refresh()
+  if ($testProcess.MainWindowHandle -ne [IntPtr]::Zero -and $testProcess.MainWindowTitle -eq 'Stills Library') {
+    [pscustomobject]@{ pid = $testProcess.Id; handle = $testProcess.MainWindowHandle.ToInt64(); title = $testProcess.MainWindowTitle } | ConvertTo-Json -Compress
+    exit 0
+  }
+  Start-Sleep -Milliseconds 200
+}
+Write-Error 'The CLI-launched app did not display a Stills Library window within 10 seconds.'
+exit 1
+`], { encoding: 'utf8', env, timeout: 15000, windowsHide: true });
+    if (visibleWindow.error) throw visibleWindow.error;
+    if (visibleWindow.status !== 0) throw new Error(`Windows CLI GUI visibility check failed: ${visibleWindow.stderr || visibleWindow.stdout}`);
+    const windowInfo = JSON.parse(visibleWindow.stdout);
+    if (windowInfo.pid !== launchedPid || !windowInfo.handle || windowInfo.title !== 'Stills Library') {
+      throw new Error(`Windows CLI did not show its own app window: ${visibleWindow.stdout}`);
+    }
+    console.log('Windows packaged GUI autolaunch, visible Stills Library window, and isolated CLI status passed.');
+  } finally {
+    if (fs.existsSync(pidFile)) {
+      const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+      if (Number.isSafeInteger(pid) && pid > 0) {
+        spawnSync(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe'), ['/pid', String(pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' });
+      }
+    }
+    const relative = path.relative(temporaryRoot, path.resolve(folder));
+    if (relative.startsWith('stills-package-check-') && !relative.includes(path.sep)) {
+      try { fs.rmSync(folder, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+      catch (error) {
+        // A locked Chromium cache or a restricted temp directory must not
+        // obscure a verification failure, or invalidate a successful check.
+        console.warn(`Temporary package-check files retained at ${folder}: ${error.code ?? error.message}`);
+      }
+    }
   }
 }
 console.log(`Verified Electron package and bundled CLI: ${packaged} (app.asar ${Math.round(fs.statSync(asar).size / 1024 / 1024)} MiB)`);

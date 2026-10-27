@@ -1,0 +1,2 @@
+# Git's patch parser requires consistent line endings, including empty context.
+*.patch text eol=lf

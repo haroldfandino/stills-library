@@ -14,7 +14,7 @@ export const SOURCE_CONFIG = {
 export type SourceKey = keyof typeof SOURCE_CONFIG;
 export type SourceConfig = { label: string; spreadsheetId: string; destinationFolderId: string };
 export type SourceConfigs = Record<SourceKey, SourceConfig>;
-export type ProjectStatus = 'To Do' | 'In Process' | 'Done' | 'Skip';
+export type ProjectStatus = 'To Do' | 'In Process' | 'Done' | 'Reviewed' | 'Skip';
 
 export interface ProjectRow {
   source: SourceKey;
