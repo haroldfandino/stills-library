@@ -132,3 +132,7 @@ Large still reviews load only visible preview rows. The complete candidate set r
 ### Multiple project reviews
 
 The app supports up to three open human reviews on computers with at least 16 GiB of RAM (two with 8–16 GiB, one below 8 GiB). Use the Open reviews buttons to switch projects. Still selections, skipped videos, video choices, and naming edits are saved separately in local drafts, including across app restarts. Close review keeps its draft and frees an open-review slot. Local drafts do not change Drive; explicitly save a project to apply its delivery revision. Project saves are queued and only one project uploads to Drive at a time.
+
+### Review workspace and shortcuts
+
+The Projects panel can be hidden with B; / focuses project search. The queue report, project actions, bulk selection actions, and delivery settings are collapsible. Press ? for the shortcut guide. Ctrl+1/2/3 switches open reviews; F toggles Approved only; E opens an enlarged preview. In the viewer, G opens shot thumbnails, S browses selected stills, T toggles thumbnails/enlargement, and Space selects or unselects the focused enlarged still. Arrow keys navigate within the active mode. Ctrl+Z and Ctrl+Y undo/redo review changes. Ctrl+S reveals delivery settings for review and never uploads automatically. Text-entry controls preserve normal typing behavior.
