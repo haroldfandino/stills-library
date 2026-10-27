@@ -22,6 +22,7 @@ const api = {
   resume: (id: string) => invoke('resume', id),
   setReviewed: (studio: Studio, id: string, reviewed: boolean) => invoke('setReviewed', studio, id, reviewed),
   reviewAgain: (id: string) => invoke('reviewAgain', id),
+  setReviewOpen: (id: string, open: boolean) => invoke('setReviewOpen', id, open),
   configureGoogle: (clientId: string) => invoke('configureGoogle', clientId),
   importGoogleCredentials: () => invoke('importGoogleCredentials'),
   signIn: () => invoke('signIn'),

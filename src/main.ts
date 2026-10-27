@@ -213,6 +213,9 @@ async function dispatch(method: string, args: unknown[], origin: 'gui' | 'cli'):
       if (typeof args[2] !== 'boolean') throw new Error('Reviewed must be checked or unchecked.');
       return service.setReviewed(args[0], String(args[1] ?? ''), args[2]);
     case 'reviewAgain': return service.reviewAgain(String(args[0] ?? ''));
+    case 'setReviewOpen':
+      if (origin !== 'gui' || typeof args[1] !== 'boolean') throw new Error('Open or close reviews in the app.');
+      return service.setReviewOpen(String(args[0] ?? ''), args[1]);
     case 'configureGoogle': {
       const clientId = String(args[0] ?? '').trim();
       if (!/^[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/.test(clientId)) throw new Error('Enter a Google Desktop OAuth client ID ending in .apps.googleusercontent.com.');

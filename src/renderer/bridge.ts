@@ -56,6 +56,7 @@ export type SessionStatus =
   | (string & {});
 
 export interface Session {
+  deferred?: boolean;
   detailsOmitted?: boolean;
   revisionActive?: boolean;
   updatedAt?: string;
@@ -84,6 +85,7 @@ export interface Session {
 }
 
 export interface AppState {
+  reviewLimit?: number;
   batch?: import('../shared/contracts').BatchRun;
   googleClientId?: string;
   accountEmail?: string;
@@ -115,6 +117,7 @@ export interface StillsApi {
   resume(sessionId: string): Promise<unknown>;
   setReviewed(studio: Studio, projectId: string, reviewed: boolean): Promise<unknown>;
   reviewAgain(sessionId: string): Promise<unknown>;
+  setReviewOpen(sessionId: string, open: boolean): Promise<unknown>;
   openPath(path: string): Promise<unknown>;
   revealPath(path: string): Promise<unknown>;
   openUrl(url: string): Promise<unknown>;

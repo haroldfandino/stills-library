@@ -255,6 +255,44 @@ test('automatic pipeline resumes a committed upload without re-exporting or dupl
 });
 
 describe('overlapping preparation and single-project delivery', () => {
+  test('queues saves from separate human reviews with one uploader and distinct destinations', async () => {
+    const workspace = new FakeWorkspace();
+    workspace.rows = [203, 204].map((code, i) => ({ source: 'screenbridge', rowNumber: i + 2, name: `[${code}SB]Project_2026`, status: 'To Do' }));
+    const folders = new Map<string, DriveFile>();
+    workspace.findOrCreateProjectFolder = async (_source, name) => {
+      const folder = { id: name, name, mimeType: 'application/vnd.google-apps.folder', parents: ['year-folder'] };
+      folders.set(name, folder); return folder;
+    };
+    const getFile = workspace.getFile.bind(workspace);
+    workspace.getFile = async id => folders.get(id) ?? getFile(id);
+    workspace.verifyProjectFolder = async (_source, name, _year, id) => {
+      const folder = await workspace.getFile(id); expect(folder.name).toBe(name); return folder;
+    };
+    const fixture = await setup(workspace);
+    const first = await fixture.service.prepare('screenbridge', '203SB');
+    await fixture.service.approveVideos(first.id, ['video-1']);
+    const second = await fixture.service.prepare('screenbridge', '204SB');
+    await fixture.service.approveVideos(second.id, ['video-1']);
+    const gate = latch();
+    const originalUpload = workspace.uploadPng.bind(workspace);
+    let active = 0, peak = 0, calls = 0;
+    workspace.uploadPng = async input => {
+      active++; peak = Math.max(peak, active);
+      try { if (calls++ === 0) await gate.promise; return await originalUpload(input); }
+      finally { active--; }
+    };
+    const saveA = fixture.service.approveStills(first.id, ['video-1:7'], { project: 'ProjectA', type: 'Final', year: '2026' });
+    await until(() => active === 1);
+    const saveB = fixture.service.approveStills(second.id, ['video-1:7'], { project: 'ProjectB', type: 'Final', year: '2026' });
+    expect(fixture.service.getSession(second.id)?.status).toBe('awaiting_stills');
+    gate.release();
+    expect((await saveA).status).toBe('done');
+    expect((await saveB).status).toBe('done');
+    expect(peak).toBe(1);
+    expect(workspace.files.map(f => f.name).sort()).toEqual(['ProjectA_Final_Still_01.png', 'ProjectB_Final_Still_01.png']);
+    expect(fixture.service.getSession(first.id)?.destinationFolderId).not.toBe(fixture.service.getSession(second.id)?.destinationFolderId);
+  });
+
   test.each([false, true])('prepares the whole backlog, preserves waiting exports on pause (upload failure: %s)', async (failUpload) => {
     const workspace = new FakeWorkspace();
     workspace.rows = [203, 204, 205].map((code, i) => ({ source: 'screenbridge', rowNumber: i + 2,
@@ -598,6 +636,24 @@ test('GUI summaries omit candidate history while on-demand details and full stat
 });
 
 describe('reviewing a completed delivery again', () => {
+  test('limits open reviews and frees a slot without changing the closed project revision', async () => {
+    const { service, create, directory, analyzed } = await setupVersions();
+    const done = await service.approveStills(analyzed.id, ['video-1:7'], NAMING);
+    const limit = service.getState().reviewLimit!;
+    await editSavedState(directory, state => {
+      for (let i = 0; i < limit; i++) state.sessions.push({ ...state.sessions[0], id: `open-${i}`, status: 'awaiting_videos', deferred: false });
+    });
+    const loaded = await create();
+    await expect(loaded.reviewAgain(done.id)).rejects.toThrow(`keep ${limit} reviews open`);
+    const before = loaded.getSession('open-0')!;
+    await loaded.setReviewOpen('open-0', false);
+    expect(loaded.getSession('open-0')).toMatchObject({ deferred: true, updatedAt: before.updatedAt, selectedFrameIds: before.selectedFrameIds });
+    await loaded.reviewAgain(done.id);
+    await expect(loaded.setReviewOpen('open-0', true)).rejects.toThrow(`keep ${limit} reviews open`);
+    await loaded.setReviewOpen(done.id, false);
+    await loaded.setReviewOpen('open-0', true);
+    expect(loaded.getSession('open-0')?.deferred).toBe(false);
+  });
   test('human review toggles Done and Reviewed without changing a delivery, and reopening clears the mark', async () => {
     const { service, workspace, counters, analyzed } = await setupVersions();
     const done = await service.approveStills(analyzed.id, ['video-1:7'], NAMING);
@@ -812,14 +868,14 @@ describe('reviewing a completed delivery again', () => {
     expect(workspace.statusChanges).toEqual(['In Process', 'Done']);
   });
 
-  test('refuses to reopen an unfinished delivery or while another project is active', async () => {
+  test('refuses unfinished delivery but allows reopening alongside another human review', async () => {
     const { service, create, directory, analyzed } = await setupVersions();
     await expect(service.reviewAgain(analyzed.id)).rejects.toThrow('Only a completed delivery');
     const done = await service.approveStills(analyzed.id, ['video-1:7'], NAMING);
     await editSavedState(directory, state => {
       state.sessions.push({ ...state.sessions[0], id: 'another-session', projectName: '[204SB]Other', status: 'awaiting_videos' });
     });
-    await expect((await create()).reviewAgain(done.id)).rejects.toThrow(/Finish or skip.*Other/);
+    expect((await (await create()).reviewAgain(done.id)).status).toBe('awaiting_stills');
   });
 });
 

@@ -135,7 +135,10 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [clientId, setClientId] = useState("");
-  const [busy, setBusy] = useState<string>();
+  const [operations, setOperations] = useState<Record<string, string>>({});
+  const [hydratedDraft, setHydratedDraft] = useState("");
+  const [draftError, setDraftError] = useState<string>();
+  const histories = useRef(new Map<string, ReviewHistory>());
   const [uiError, setUiError] = useState<string>();
   const [checkedVideos, setCheckedVideos] = useState<Set<string>>(new Set());
   const [checkedFrames, setCheckedFrames] = useState<Set<string>>(new Set());
@@ -215,6 +218,11 @@ export default function App() {
       ?? projects[0];
   }, [projects, selectedKey, state.currentSessionId, state.sessions]);
 
+  const operationKey = selectedProject ? projectKey(selectedProject) : "global";
+  const busy = operations[operationKey];
+  const anyBusy = Object.keys(operations).length > 0;
+  const openReviews = (state.sessions ?? []).filter(item => !item.deferred && ["awaiting_videos", "awaiting_stills", "analyzing", "exporting", "uploading", "error"].includes(item.status));
+
   const runningEntries = state.batch?.entries.filter(entry => entry.status === 'running') ?? [];
   const waitingEntries = runningEntries.filter(entry => state.sessions?.find(s => s.id === entry.sessionId)?.message === 'PNGs prepared; waiting for the upload slot.');
   const workingEntries = runningEntries.filter(entry => !waitingEntries.includes(entry));
@@ -245,47 +253,57 @@ export default function App() {
     }).catch(error => { if (!cancelled) setUiError(String(error)); });
     return () => { cancelled = true; };
   }, [bridge, sessionSummary?.id, sessionSummary?.updatedAt, sessionSummary?.detailsOmitted]);
-  const session = sessionSummary?.detailsOmitted && detail?.id === sessionSummary.id
+  const session = sessionSummary?.detailsOmitted && detail?.id === sessionSummary.id && detail?.updatedAt === sessionSummary.updatedAt
     ? { ...detail, ...sessionSummary, frames: detail.frames, videos: detail.videos, revision: detail.revision }
     : sessionSummary;
-  const loadingDetail = Boolean(sessionSummary?.detailsOmitted && detail?.id !== sessionSummary.id);
+  const loadingDetail = Boolean(sessionSummary?.detailsOmitted && (detail?.id !== sessionSummary.id || detail?.updatedAt !== sessionSummary.updatedAt));
 
   const videoSeed = (session?.videos ?? []).map((video) => `${video.id}:${video.selected ? 1 : 0}`).join("|");
   const frameSeed = (session?.frames ?? []).map((frame) => `${frameKey(frame)}:${frame.selected === false ? 0 : 1}`).join("|");
 
+  const draftIdentity = session ? `${session.id}:${session.updatedAt ?? ""}` : "";
   useEffect(() => {
-    setCheckedVideos(new Set((session?.videos ?? []).filter((video) => video.selected).map((video) => video.id)));
-  }, [session?.id, videoSeed]);
-
-  useEffect(() => {
-    let frames = new Set((session?.frames ?? []).filter(frame => frame.selected !== false).map(frameKey));
-    let skipped: Record<string, string[]> = {};
+    if (!session || loadingDetail) return;
+    let draft: any;
     try {
-      const draft = JSON.parse(sessionStorage.getItem('stills-review-draft') ?? 'null');
-      if (draft?.sessionId === session?.id && draft?.updatedAt === session?.updatedAt && Array.isArray(draft.frameIds)) {
-        const allowed = new Set(session?.frames?.map(frameKey));
-        frames = new Set<string>(draft.frameIds.filter((id: unknown) => typeof id === 'string' && allowed.has(id)));
-        if (draft.skippedVideoFrames && typeof draft.skippedVideoFrames === 'object') {
-          const videos = new Set(session?.videos?.map(video => video.id));
-          skipped = Object.fromEntries(Object.entries(draft.skippedVideoFrames)
-            .filter(([id, values]) => videos.has(id) && Array.isArray(values))
-            .map(([id, values]) => [id, (values as unknown[]).filter((key): key is string => typeof key === 'string' && allowed.has(key))]));
-        }
-      }
-    } catch { /* Use the saved approved selection if the draft is unavailable. */ }
-    reviewHistory.current.clear();
+      const saved = localStorage.getItem(`stills-review-draft:${session.id}`) ?? sessionStorage.getItem('stills-review-draft');
+      const parsed = saved ? JSON.parse(saved) : undefined;
+      if (parsed?.sessionId === session.id && parsed.updatedAt === session.updatedAt) draft = parsed;
+    } catch { /* Saved suggestions remain available if a draft cannot be read. */ }
+    const allowed = new Set((session.frames ?? []).map(frameKey));
+    const videos = new Set((session.videos ?? []).map(video => video.id));
+    let frames = new Set((session.frames ?? []).filter(frame => frame.selected !== false).map(frameKey));
+    let skipped: Record<string, string[]> = {};
+    if (Array.isArray(draft?.frameIds)) frames = new Set(draft.frameIds.filter((id: unknown): id is string => typeof id === 'string' && allowed.has(id)));
+    if (draft?.skippedVideoFrames && typeof draft.skippedVideoFrames === 'object') {
+      skipped = Object.fromEntries(Object.entries(draft.skippedVideoFrames)
+        .filter(([id, values]) => videos.has(id) && Array.isArray(values))
+        .map(([id, values]) => [id, (values as unknown[]).filter((key): key is string => typeof key === 'string' && allowed.has(key))]));
+    }
+    setCheckedVideos(new Set(Array.isArray(draft?.videoIds) ? draft.videoIds.filter((id: string) => videos.has(id)) : (session.videos ?? []).filter(video => video.selected).map(video => video.id)));
+    const history = histories.current.get(draftIdentity) ?? new ReviewHistory();
+    histories.current.set(draftIdentity, history);
+    reviewHistory.current = history;
     reviewSelection.current = { frames, skipped };
     setCheckedFrames(frames);
     setSkippedVideoFrames(skipped);
+    setProjectTag(typeof draft?.naming?.project === 'string' ? draft.naming.project : session.naming?.project ?? selectedProject?.name ?? "");
+    setTypeTag(typeof draft?.naming?.type === 'string' ? draft.naming.type : session.naming?.type ?? "");
+    setYearTag(typeof draft?.naming?.year === 'string' ? draft.naming.year : session.naming?.year ?? suggestedYear(selectedProject?.name));
     setLastVideoSkip(undefined);
     setPreviewFrameId(undefined);
-  }, [session?.id, session?.updatedAt, frameSeed]);
+    setHydratedDraft(draftIdentity);
+  }, [draftIdentity, loadingDetail, frameSeed, videoSeed]);
 
   useEffect(() => {
-    setProjectTag(session?.naming?.project ?? selectedProject?.name ?? "");
-    setTypeTag(session?.naming?.type ?? "");
-    setYearTag(session?.naming?.year ?? suggestedYear(selectedProject?.name));
-  }, [session?.id, session?.status, selectedProject?.name]);
+    if (!session || loadingDetail || hydratedDraft !== draftIdentity || !["awaiting_videos", "awaiting_stills"].includes(session.status)) return;
+    try {
+      localStorage.setItem(`stills-review-draft:${session.id}`, JSON.stringify({ sessionId: session.id, updatedAt: session.updatedAt,
+        frameIds: [...checkedFrames], videoIds: [...checkedVideos], skippedVideoFrames,
+        naming: { project: projectTag, type: typeTag, year: yearTag } }));
+      setDraftError(undefined);
+    } catch { setDraftError('The local draft could not be saved. Keep this review open until you save its changes to Drive.'); }
+  }, [draftIdentity, hydratedDraft, loadingDetail, session?.status, checkedFrames, checkedVideos, skippedVideoFrames, projectTag, typeTag, yearTag]);
 
   const visibleProjects = projects.filter((project) => {
     if (filter !== "All" && project.status !== filter) return false;
@@ -395,7 +413,8 @@ export default function App() {
   };
 
   const perform = async (label: string, action: () => Promise<unknown>) => {
-    setBusy(label);
+    const key = operationKey;
+    setOperations(previous => ({ ...previous, [key]: label }));
     setUiError(undefined);
     try {
       await action();
@@ -404,7 +423,7 @@ export default function App() {
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error));
     } finally {
-      setBusy(undefined);
+      setOperations(previous => { const next = { ...previous }; delete next[key]; return next; });
     }
   };
 
@@ -463,7 +482,7 @@ export default function App() {
                 <ActionButton onClick={() => bridge && void perform("Saving Google setup", () => bridge.configureGoogle(clientId.trim()))} disabled={!bridge || !clientId.trim() || Boolean(busy)}>Save ID</ActionButton></div>
               <div className="root-actions"><ActionButton onClick={() => bridge && void perform("Importing Google setup", () => bridge.importGoogleCredentials())} disabled={!bridge || Boolean(busy)}>Import OAuth JSON</ActionButton><ActionButton variant="primary" onClick={() => bridge && void perform("Signing in", async () => { await bridge.signIn(); await refresh(); })} disabled={!bridge || !state.configured || Boolean(busy)}>Sign in with Google ↗</ActionButton></div>
               <p className="setup-hint">Import the JSON downloaded for a Google Desktop app client, or save its client ID above.</p>
-              {state.authenticated && <ActionButton variant="quiet" onClick={() => bridge && void perform("Signing out", () => bridge.signOut())} disabled={Boolean(busy)}>Sign out</ActionButton>}
+              {state.authenticated && <ActionButton variant="quiet" onClick={() => bridge && void perform("Signing out", () => bridge.signOut())} disabled={anyBusy}>Sign out</ActionButton>}
             </div>
             <div className="settings-card"><span className="settings-number">02</span><h3>Local source folders</h3>
               {Object.keys(state.sourceRoots ?? {}).length ? <div className="root-list">{Object.entries(state.sourceRoots ?? {}).map(([studio, path]) => <div className="root-item" key={studio}><strong>{STUDIO_LABEL[studio] ?? studio}</strong><span title={path}>{path || "Choose a source folder"}</span></div>)}</div> : <p>Choose the Filmkraft and Screenbridge source folders before preparing a project.</p>}
@@ -476,7 +495,7 @@ export default function App() {
 
       <div className="workspace">
         <aside className="queue-panel">
-          <div className="queue-heading"><span className="eyebrow">PROJECTS</span><h1>Review queue</h1><p>One project at a time, with your approval before each handoff.</p></div>
+          <div className="queue-heading"><span className="eyebrow">PROJECTS</span><h1>Review queue</h1><p>Up to {state.reviewLimit ?? 3} open reviews. One Drive upload at a time.</p></div>
           <div className="queue-stat-row"><div><strong>{counts["To Do"] ?? 0}</strong><span>To do</span></div><div><strong>{counts["In Process"] ?? 0}</strong><span>In process</span></div><div><strong>{counts.Done ?? 0}</strong><span>Done</span></div></div>
           <input className="queue-search" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search projects" aria-label="Search projects" />
           <div className="filter-row" aria-label="Filter projects">{FILTERS.map((item) => <button type="button" key={item} onClick={() => setFilter(item)} className={`filter-pill ${filter === item ? "selected" : ""}`}>{item} <span>{counts[item] ?? 0}</span></button>)}</div>
@@ -494,13 +513,17 @@ export default function App() {
         </aside>
 
         <main className="main-panel">
+          <nav title="Drafts are saved on this computer. Save changes to Drive when ready." className="open-reviews" aria-label="Open project reviews"><span>Open reviews · {openReviews.length}/{state.reviewLimit ?? 3}</span>{openReviews.map(item => <button type="button" key={item.id} className={item.id === session?.id ? "selected" : ""} onClick={() => { setSelectedKey(`${item.studio}:${item.projectId}`); setSearch(""); setFilter("All"); }}>{item.projectName || item.projectId}{["uploading", "exporting"].includes(item.status) ? " · Saving" : operations[`${item.studio}:${item.projectId}`] ? " · Waiting" : ""}</button>)}</nav>
+          {draftError && <div className="alert alert-error" role="alert">{draftError}</div>}
+          {session?.deferred && ["awaiting_videos", "awaiting_stills"].includes(session.status) && <section className="hero-card"><h3>Review closed</h3><p>Your draft is kept separately for this project.</p><ActionButton onClick={() => bridge && void perform("Opening review", () => bridge.setReviewOpen(session.id, true))} disabled={Boolean(busy)}>Open review</ActionButton></section>}
+
           {(uiError || state.error) && <div className="alert alert-error" role="alert"><strong>Action needed</strong><span>{uiError || state.error}</span><button type="button" onClick={() => setUiError(undefined)} aria-label="Dismiss error">×</button></div>}
           {busy && <div className="busy-banner" role="status"><span className="spinner" /> {busy}…</div>}
           {selectedProject ? (
             <>
               <div className="project-header">
                 <div className="project-title"><div className="eyebrow">{selectedProject.studio.toUpperCase()} <span className="crumb">/</span> {selectedProject.code || selectedProject.id}</div><h2>{selectedProject.name}</h2><div className="project-meta"><span className={`status-chip ${statusClass(session?.status ?? selectedProject.status)}`}>{selectedProject.status === "Reviewed" ? "Reviewed" : session ? phaseLabel(session.status, Boolean(session.revision || session.revisionActive)) : projectStatusLabel(selectedProject.status)}</span><span>Sheet status: {projectStatusLabel(selectedProject.status)}</span>{["Done", "Reviewed"].includes(selectedProject.status) && <label className="reviewed-toggle"><input type="checkbox" checked={selectedProject.status === "Reviewed"} disabled={!bridge || Boolean(busy) || state.batch?.status === "running" || Boolean(session && session.status !== "done")} onChange={event => { const reviewed = event.target.checked; if (bridge) void perform(reviewed ? "Marking project Reviewed" : "Returning project to Done", () => bridge.setReviewed(selectedProject.studio, selectedProject.id, reviewed)); }} /> Reviewed</label>}</div>{session?.manualSourcePath && <div className="source-confirmation" title={session.manualSourcePath}>Selected source: {session.manualSourcePath}</div>}</div>
-                <div className="project-tools">{session && (session.status === "awaiting_videos" || session.status === "skipped" || (session.status === "error" && session.lastPhase === "discovering")) && <ActionButton onClick={() => bridge && void perform("Finding videos in selected folder", () => bridge.chooseProjectSource(session.id))} disabled={!bridge || Boolean(busy) || state.batch?.status === "running"}>Choose source folder</ActionButton>}
+                <div className="project-tools">{session && !session.deferred && ["awaiting_videos", "awaiting_stills", "error"].includes(session.status) && <ActionButton onClick={() => bridge && void perform("Closing review", () => bridge.setReviewOpen(session.id, false))} disabled={Boolean(busy)}>Close review · keep draft</ActionButton>}{session && (session.status === "awaiting_videos" || session.status === "skipped" || (session.status === "error" && session.lastPhase === "discovering")) && <ActionButton onClick={() => bridge && void perform("Finding videos in selected folder", () => bridge.chooseProjectSource(session.id))} disabled={!bridge || Boolean(busy) || state.batch?.status === "running"}>Choose source folder</ActionButton>}
                   <ActionButton variant="quiet" onClick={() => openPath(session?.sourcePath || selectedProject.sourcePath)} disabled={!session?.sourcePath && !selectedProject.sourcePath}>Open source ↗</ActionButton>
                   <ActionButton variant="quiet" onClick={() => openPath(session?.stagingPath)} disabled={!session?.stagingPath}>Open staging ↗</ActionButton>
                   <ActionButton variant="quiet" onClick={() => openUrl(session?.destinationUrl || selectedProject.destinationUrl)} disabled={!session?.destinationUrl && !selectedProject.destinationUrl}>Open Drive ↗</ActionButton>
@@ -516,7 +539,7 @@ export default function App() {
               {!session && <section className="hero-card"><div className="hero-icon">▣</div><span className="eyebrow">READY TO BEGIN</span><h3>Prepare this project</h3><p>We’ll locate its delivery videos and propose the best cuts for your review. Nothing is exported until you approve.</p><div className="hero-actions"><ActionButton variant="primary" onClick={() => bridge && void perform("Preparing project", () => bridge.prepare(selectedProject.studio, selectedProject.id))} disabled={!bridge || Boolean(busy) || selectedProject.status === "Done" || selectedProject.status === "Reviewed" || selectedProject.status === "Skip"}>Prepare project <span aria-hidden="true">→</span></ActionButton>{selectedProject.status === "To Do" && <ActionButton variant="quiet" onClick={skipProject} disabled={!bridge || Boolean(busy)}>Skip project</ActionButton>}</div></section>}
 
               {loadingDetail && <section className="hero-card"><div className="spinner"/><h3>Loading saved review…</h3></section>}
-              {session?.status === "awaiting_videos" && !loadingDetail && <section className="review-section"><div className="section-heading"><div><span className="eyebrow">APPROVAL 01 / 02</span><h3>Choose videos</h3><p>Every discovered delivery file is listed below. The suggested cuts are preselected; adjust them before analysis.</p></div><div className="selection-count"><strong>{checkedVideos.size}</strong><span>of {session.videos?.length ?? 0} selected</span></div></div>
+              {session?.status === "awaiting_videos" && !session.deferred && !loadingDetail && <section className="review-section"><div className="section-heading"><div><span className="eyebrow">APPROVAL 01 / 02</span><h3>Choose videos</h3><p>Every discovered delivery file is listed below. The suggested cuts are preselected; adjust them before analysis.</p></div><div className="selection-count"><strong>{checkedVideos.size}</strong><span>of {session.videos?.length ?? 0} selected</span></div></div>
                 <div className="selection-actions"><ActionButton variant="quiet" onClick={() => setCheckedVideos(new Set((session.videos ?? []).filter(video => video.selected).map(video => video.id)))} disabled={Boolean(busy)}>Use suggestions</ActionButton><ActionButton variant="quiet" onClick={() => setCheckedVideos(new Set((session.videos ?? []).map(video => video.id)))} disabled={Boolean(busy)}>Select all</ActionButton><ActionButton variant="quiet" onClick={() => setCheckedVideos(new Set())} disabled={Boolean(busy)}>Clear selection</ActionButton></div>
                 {session.manualSourcePath && <div className="source-review-note"><strong>Manually selected source</strong><span>{session.manualSourcePath}</span><small>Confirm these videos belong to this Stills row before approval.</small></div>}
                 {session.videos?.length ? <div className="video-list">{session.videos.map((video) => <label className={`video-row ${checkedVideos.has(video.id) ? "checked" : ""}`} key={video.id}><input type="checkbox" checked={checkedVideos.has(video.id)} onChange={() => setCheckedVideos((previous) => { const next = new Set(previous); if (next.has(video.id)) next.delete(video.id); else next.add(video.id); return next; })} /><span className="custom-check" aria-hidden="true">✓</span><span className="video-content"><span className="video-top"><strong title={video.path}>{video.name || shortName(video.path)}</strong>{video.selected && <em>Suggested</em>}</span><span className="video-details"><span>{durationLabel(video.durationSec)}</span><span>{video.aspect || "Aspect unknown"}</span><span>{video.codec || video.format || "Format unknown"}</span>{video.width && video.height && <span>{video.width} × {video.height}</span>}{video.variant && <span>{video.variant}</span>}{video.channel && <span>{video.channel}</span>}{video.voiceover && <span>{video.voiceover}</span>}</span><span className="video-path" title={video.path}>{video.path}</span></span><button className="row-open" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); if (bridge) void perform("Showing video", () => bridge.revealPath(video.path)); }} title="Show video in Finder or Explorer" aria-label={`Open ${video.name || shortName(video.path)}`}>↗</button></label>)}</div> : <div className="empty-state"><strong>No videos found</strong><p>Check the delivery folder or source-root setup, then resume the scan.</p></div>}
@@ -524,7 +547,7 @@ export default function App() {
                 <div className="review-footer"><span>Analysis begins only for the checked videos.</span><div>{!session.revision && <ActionButton variant="quiet" onClick={skipProject} disabled={Boolean(busy)}>Skip project</ActionButton>}<ActionButton variant="primary" onClick={() => bridge && void perform("Analyzing selected videos", () => bridge.approveVideos(session.id, [...checkedVideos]))} disabled={!bridge || !checkedVideos.size || Boolean(busy)}>Approve {checkedVideos.size} {checkedVideos.size === 1 ? "video" : "videos"} <span aria-hidden="true">→</span></ActionButton></div></div>
               </section>}
 
-              {session?.status === "awaiting_stills" && !loadingDetail && <section className="review-section"><div className="section-heading"><div><span className="eyebrow">APPROVAL 02 / 02</span><h3>Choose stills</h3><p>{session.previousDeliveryManifest ? "Your previous selection is preselected for review. Adjust the stills and check the folders and filenames before approving again." : "One smart pick per shot plus the final source frame is preselected. Add or remove frames, then review the folders and filenames before export."}</p></div><div className="selection-count"><strong>{frameSelections.length}</strong><span>of {availableFrames.length} selected</span></div></div>
+              {session?.status === "awaiting_stills" && !session.deferred && !loadingDetail && <section className="review-section"><div className="section-heading"><div><span className="eyebrow">APPROVAL 02 / 02</span><h3>Choose stills</h3><p>{session.previousDeliveryManifest ? "Your previous selection is preselected for review. Adjust the stills and check the folders and filenames before approving again." : "One smart pick per shot plus the final source frame is preselected. Add or remove frames, then review the folders and filenames before export."}</p></div><div className="selection-count"><strong>{frameSelections.length}</strong><span>of {availableFrames.length} selected</span></div></div>
                 <div className="selection-actions"><ActionButton title="Undo last review change (Ctrl+Z)" onClick={undoReview} disabled={!reviewHistory.current.canUndo || Boolean(busy)}>Undo</ActionButton><ActionButton title="Redo review change (Ctrl+Y or Ctrl+Shift+Z)" onClick={redoReview} disabled={!reviewHistory.current.canRedo || Boolean(busy)}>Redo</ActionButton>{!approvedOnly && <ActionButton variant="quiet" onClick={() => updateFrameSelection(new Set([...checkedFrames, ...videoFrames.map(frameKey)]))} disabled={Boolean(busy)}>{reviewVideoId ? "Select all in this video" : "Select all"}</ActionButton>}<ActionButton variant="quiet" onClick={() => { if (reviewVideoId) skipVideos(new Set([reviewVideoId])); else updateFrameSelection(new Set()); }} disabled={Boolean(busy) || (reviewVideoId ? !videoCounts.get(reviewVideoId)?.approved : !checkedFrames.size)}>{reviewVideoId ? "Skip this video" : "Clear selection"}</ActionButton><ActionButton onClick={() => { setVideosToSkip(new Set(reviewVideoId && videoCounts.get(reviewVideoId)?.approved ? [reviewVideoId] : [])); setSkipVideosOpen(open => !open); }} disabled={Boolean(busy)}>Skip videos…</ActionButton><span>Enlarge a preview to inspect it before delivery.</span><ActionButton onClick={() => reviewSaveRef.current?.scrollIntoView({ block: "end" })} disabled={Boolean(busy)}>Review & save changes ↓</ActionButton></div>
                 {session.error && <div className="review-alert" role="alert"><strong>Delivery paused</strong><span>{session.error}</span></div>}
                 {skipVideosOpen && <section className="video-skip-panel" aria-label="Skip stills by video"><h4>Skip all stills from videos</h4><p>Choose one or more videos to remove from your approved selection. Save changes to Drive when your review is finished.</p><div className="video-skip-tools"><ActionButton onClick={() => setVideosToSkip(new Set(skipCandidateVideos.filter(video => videoCounts.get(video.id)!.approved > 0).map(video => video.id)))}>Select all videos</ActionButton><ActionButton onClick={() => setVideosToSkip(new Set())} disabled={!videosToSkip.size}>Clear video selection</ActionButton></div><div className="video-skip-list">{skipCandidateVideos.map(video => <label key={video.id}><input type="checkbox" aria-label={`Skip all stills from ${video.name || shortName(video.path)}`} checked={videosToSkip.has(video.id)} disabled={!videoCounts.get(video.id)!.approved} onChange={() => setVideosToSkip(previous => { const next = new Set(previous); if (next.has(video.id)) next.delete(video.id); else next.add(video.id); return next; })}/><span><strong>{video.name || shortName(video.path)}</strong><small>{videoCounts.get(video.id)!.approved} approved stills</small></span></label>)}</div><div className="video-skip-tools"><ActionButton variant="primary" onClick={() => skipVideos(videosToSkip)} disabled={!skipStillCount}>Skip {videosToSkip.size} {videosToSkip.size === 1 ? "video" : "videos"} · {skipStillCount} stills</ActionButton><ActionButton onClick={() => setSkipVideosOpen(false)}>Cancel</ActionButton></div></section>}
@@ -552,7 +575,7 @@ export default function App() {
           ) : <section className="welcome-panel"><span className="welcome-symbol">▣</span><span className="eyebrow">STILLS LIBRARY</span><h2>{initializing ? "Loading projects…" : "Ready when you are"}</h2><p>{initializing ? "Reading your project queue." : "Connect Google and choose your source folders in Setup, then refresh the queue."}</p><ActionButton variant="primary" onClick={() => setSettingsOpen(true)}>Open setup →</ActionButton></section>}
         </main>
       </div>
-      {previewFrame && session?.status === "awaiting_stills" && <FramePreview frame={previewFrame} selected={checkedFrames.has(frameKey(previewFrame))} index={Math.max(0, previewIndex)} count={Math.max(1, visibleFrames.length)} folder={frameFolder(previewFrame)} onClose={() => setPreviewFrameId(undefined)} onMove={(offset) => { const next = visibleFrames[previewIndex + offset]; if (next) setPreviewFrameId(frameKey(next)); }} onToggle={() => {
+      {previewFrame && session?.status === "awaiting_stills" && !session.deferred && <FramePreview frame={previewFrame} selected={checkedFrames.has(frameKey(previewFrame))} index={Math.max(0, previewIndex)} count={Math.max(1, visibleFrames.length)} folder={frameFolder(previewFrame)} onClose={() => setPreviewFrameId(undefined)} onMove={(offset) => { const next = visibleFrames[previewIndex + offset]; if (next) setPreviewFrameId(frameKey(next)); }} onToggle={() => {
         const id = frameKey(previewFrame);
         if (checkedFrames.has(id)) {
           // Resolve the next candidate before Approved only removes this one.

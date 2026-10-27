@@ -342,3 +342,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 
 .reviewed-toggle { display:inline-flex; align-items:center; gap:8px; cursor:pointer; }
 .reviewed-toggle input { accent-color:#daf76b; width:18px; height:18px; }
+
+.open-reviews { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:20px; }
+.open-reviews>span { color:var(--text-muted); font-size:12px; }
+.open-reviews button { background:#1d2c25; color:#d8e0da; border:1px solid #3b4a40; border-radius:8px; padding:8px 10px; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; }
+.open-reviews button.selected { border-color:#dcf76b; color:#dcf76b; }

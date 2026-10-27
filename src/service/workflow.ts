@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { totalmem } from 'node:os';
+import { reviewCapacity } from '../shared/review-capacity';
 import type { GoogleWorkspace } from '../google/workspace.js';
 import type { DriveFile, ProjectRow } from '../google/types.js';
 import {
@@ -208,6 +210,7 @@ export class WorkflowService {
     const data = includeDetails ? this.store.get() : this.store.read(value => ({ ...value,
       sessions: value.sessions.map(session => sessionView(session, true)) }));
     return {
+      reviewLimit: reviewCapacity(totalmem()),
       authenticated: false,
       configured: Boolean(data.config.googleClientId),
       projects: data.projects,
@@ -551,6 +554,7 @@ export class WorkflowService {
     this.assertManualSession(sessionId);
     return this.serial(async () => {
       const session = this.requireSession(sessionId);
+      this.assertReviewSlot(sessionId);
       if (!(session.status === 'awaiting_videos'
           || session.status === 'skipped'
           || (session.status === 'error' && session.lastPhase === 'discovering'))) {
@@ -572,7 +576,7 @@ export class WorkflowService {
         await this.setProjectStatus(session, 'To Do');
       }
       const updated = await this.saveSession({ ...session,
-        sourcePath: folder, manualSourcePath: folder,
+        sourcePath: folder, manualSourcePath: folder, deferred: false,
         status: 'discovering', lastPhase: 'discovering', error: undefined,
         videos: [], frames: [], selectedVideoIds: [], selectedFrameIds: [],
         analyses: undefined, exports: undefined, uploadResults: undefined, versionFolders: undefined,
@@ -595,10 +599,15 @@ export class WorkflowService {
       if (!project) throw new Error(`Project ${projectId} is absent from the ${studio} Stills tab.`);
       const existing = this.store.get().sessions.find(item => item.studio === studio
         && item.projectId === projectId && !TERMINAL.has(item.status));
-      if (existing) return this.withPreviewUrls(existing);
-      const active = this.store.get().sessions.find(item => !TERMINAL.has(item.status) && !item.deferred
-        && !(item.status === 'awaiting_stills' && item.revision));
-      if (active) throw new Error(`Finish or skip ${active.projectName} before preparing another project.`);
+      if (existing) {
+        if (existing.deferred) {
+          this.assertReviewSlot(existing.id);
+          await this.store.update(data => { data.sessions.find(s => s.id === existing.id)!.deferred = false; });
+          this.notify();
+        }
+        return this.withPreviewUrls(this.requireSession(existing.id));
+      }
+      this.assertReviewSlot();
       if (project.status !== 'To Do') throw new Error(`${project.name} is ${project.status}; only To Do rows can start.`);
       const now = new Date().toISOString();
       const id = randomUUID();
@@ -710,6 +719,28 @@ export class WorkflowService {
   }
 
   /** Reopen saved suggestions; Drive changes happen only after revision approval. */
+  private assertReviewSlot(excludeId?: string): void {
+    const count = this.store.read(data => data.sessions.filter(s => s.id !== excludeId && !TERMINAL.has(s.status) && !s.deferred).length);
+    const limit = reviewCapacity(totalmem());
+    if (count >= limit) throw new Error(`You can keep ${limit} reviews open on this computer. Close a review to open another; its draft will be kept.`);
+  }
+
+  setReviewOpen(sessionId: string, open: boolean): Promise<Session> {
+    this.assertManualSession(sessionId);
+    return this.serial(async () => {
+      const session = this.requireSession(sessionId);
+      if (!['awaiting_videos', 'awaiting_stills', 'error'].includes(session.status)) throw new Error('Only a project waiting for human review can be opened or closed.');
+      if (open) this.assertReviewSlot(sessionId);
+      // Do not change updatedAt: local drafts are tied to this saved revision.
+      await this.store.update(data => {
+        const saved = data.sessions.find(s => s.id === sessionId)!;
+        saved.deferred = !open;
+      });
+      this.notify();
+      return this.withPreviewUrls(this.requireSession(sessionId));
+    });
+  }
+
   setReviewed(studio: Studio, projectId: string, reviewed: boolean): Promise<void> {
     return this.serial(async () => {
       if (this.automaticRunning) throw new Error('Wait for automatic processing to finish before marking a human review.');
@@ -733,9 +764,7 @@ export class WorkflowService {
     return this.serial(async () => {
       const session = this.requireSession(sessionId);
       if (session.status !== 'done') throw new Error('Only a completed delivery can be reopened for still review.');
-      const active = this.store.get().sessions.find(item => !TERMINAL.has(item.status) && !item.deferred
-        && !(item.status === 'awaiting_stills' && item.revision));
-      if (active) throw new Error(`Finish or skip ${active.projectName} before reopening another project.`);
+      this.assertReviewSlot(sessionId);
       if (!session.stagingPath || !session.analyses?.length || !session.frames.length) {
         throw new Error('Saved analysis is unavailable; prepare a new project review.');
       }
@@ -764,7 +793,13 @@ export class WorkflowService {
 
   resume(sessionId: string): Promise<Session> {
     this.assertManualSession(sessionId);
-    return this.serial(() => this.resumeWork(sessionId));
+    return this.serial(async () => {
+      if (this.requireSession(sessionId).deferred) {
+        this.assertReviewSlot(sessionId);
+        await this.store.update(data => { data.sessions.find(s => s.id === sessionId)!.deferred = false; });
+      }
+      return this.resumeWork(sessionId);
+    });
   }
 
   private async resumeWork(sessionId: string, prepareOnly = false): Promise<Session> {

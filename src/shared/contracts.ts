@@ -107,6 +107,7 @@ export interface AppConfig {
 }
 
 export interface AppState {
+  reviewLimit?: number;
   batch?: BatchRun;
   googleClientId?: string;
   accountEmail?: string;
