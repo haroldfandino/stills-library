@@ -133,6 +133,7 @@ export default function App() {
   const [selectedKey, setSelectedKey] = useState<string>();
   const [filter, setFilter] = useState<QueueFilter>("All");
   const [search, setSearch] = useState("");
+  const [locateProjectRequest, setLocateProjectRequest] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [clientId, setClientId] = useState("");
   const [operations, setOperations] = useState<Record<string, string>>({});
@@ -322,7 +323,7 @@ export default function App() {
     const item = row.getBoundingClientRect();
     if (item.top < viewport.top) list.scrollTop += item.top - viewport.top;
     else if (item.bottom > viewport.bottom) list.scrollTop += item.bottom - viewport.bottom;
-  }, [selectedProjectKey, selectedProjectVisible]);
+  }, [selectedProjectKey, selectedProjectVisible, locateProjectRequest]);
   const counts = Object.fromEntries(FILTERS.map((item) => [item, item === "All" ? projects.length : projects.filter((project) => project.status === item).length]));
   const selectedFrames = (session?.frames ?? []).filter((frame) => checkedFrames.has(frameKey(frame)));
   const frameSelections = selectedFrames.map(frameKey);
@@ -498,6 +499,7 @@ export default function App() {
           <div className="queue-heading"><span className="eyebrow">PROJECTS</span><h1>Review queue</h1><p>Up to {state.reviewLimit ?? 3} open reviews. One Drive upload at a time.</p></div>
           <div className="queue-stat-row"><div><strong>{counts["To Do"] ?? 0}</strong><span>To do</span></div><div><strong>{counts["In Process"] ?? 0}</strong><span>In process</span></div><div><strong>{counts.Done ?? 0}</strong><span>Done</span></div></div>
           <input className="queue-search" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search projects" aria-label="Search projects" />
+          <button type="button" className="locate-project" disabled={!selectedProject} title="Show the current project in the full project list" onClick={() => { setSearch(""); setFilter("All"); setLocateProjectRequest(value => value + 1); }}>Find current project ↓</button>
           <div className="filter-row" aria-label="Filter projects">{FILTERS.map((item) => <button type="button" key={item} onClick={() => setFilter(item)} className={`filter-pill ${filter === item ? "selected" : ""}`}>{item} <span>{counts[item] ?? 0}</span></button>)}</div>
           <div className="project-list" aria-label="Projects" ref={projectListRef}>
             {visibleProjects.length ? visibleProjects.map((project) => {
