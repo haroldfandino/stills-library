@@ -14,7 +14,7 @@ export function previewNavigation(frames: Frame[], current: Frame, selected: Set
   if (mode === 'shot') candidates.sort((a, b) => position(a) - position(b));
   const index = candidates.findIndex(frame => previewFrameKey(frame) === previewFrameKey(current));
   const anchor = order.get(previewFrameKey(current)) ?? -1;
-  return { count: candidates.length, index,
+  return { candidates, count: candidates.length, index,
     previous: mode === 'shot' ? candidates[index - 1] : candidates.filter(frame => order.get(previewFrameKey(frame))! < anchor).at(-1),
     next: mode === 'shot' ? candidates[index + 1] : candidates.find(frame => order.get(previewFrameKey(frame))! > anchor),
   };

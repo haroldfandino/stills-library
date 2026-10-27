@@ -354,3 +354,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .preview-navigation-mode button { background:#1d2c25; color:#d8e0da; border:1px solid #3b4a40; border-radius:8px; padding:8px 12px; cursor:pointer; }
 .preview-navigation-mode button[aria-pressed="true"] { color:#101b18; background:#dcf76b; border-color:#dcf76b; }
 .preview-navigation-mode span { color:#aab7ad; font-size:12px; }
+
+.shot-view-switch { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding-bottom:10px; }
+.shot-view-switch button { background:#1d2c25; color:#d8e0da; border:1px solid #3b4a40; border-radius:8px; padding:8px 12px; cursor:pointer; }
+.shot-view-switch button[aria-pressed="true"] { background:#dcf76b; color:#101b18; }
+.shot-view-switch span { color:#aab7ad; font-size:12px; }
+.shot-thumbnail-grid { margin:10px 0 16px; }
+.shot-thumbnail-grid .virtual-frame-grid { height:min(60vh,calc(94vh - 280px)); min-height:180px; }
+.shot-thumbnail.current { outline:2px solid #dcf76b; outline-offset:-2px; }

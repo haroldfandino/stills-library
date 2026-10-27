@@ -211,7 +211,12 @@ const VERSION_NAMES = ['01_Mustela_Baby', '02_Mustela_Parents'];
 
 async function waitBatch(service: WorkflowService) {
   for (let i = 0; i < 400; i++) {
-    if (service.getState().batch?.status !== 'running') return service.getState().batch!;
+    if (service.getState().batch?.status !== 'running') {
+      // The final status is persisted before the worker finishes writing its
+      // report. Drain it before fixture cleanup removes the state directory.
+      await (service as unknown as { batchWorker?: Promise<void> }).batchWorker;
+      return service.getState().batch!;
+    }
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   throw new Error('Batch did not finish');

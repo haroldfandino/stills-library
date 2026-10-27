@@ -111,21 +111,26 @@ function ActionButton({
   return <button type="button" className={`button button-${variant}`} onClick={onClick} disabled={disabled} title={title}>{children}</button>;
 }
 
-function FramePreview({ frame, selected, index, count, folder, mode, onMode, hasPrevious, hasNext, onClose, onMove, onToggle }: {
+function FramePreview({ frame, selected, index, count, folder, mode, onMode, hasPrevious, hasNext, shotFrames, selectedIds, onChoose, onToggleFrame, onClose, onMove, onToggle }: {
   frame: Frame; selected: boolean; index: number; count: number; folder: string;
   mode: PreviewMode; onMode: (mode: PreviewMode) => void; hasPrevious: boolean; hasNext: boolean;
+  shotFrames: Frame[]; selectedIds: Set<string>; onChoose: (id: string) => void; onToggleFrame: (id: string) => void;
   onClose: () => void; onMove: (offset: number) => void; onToggle: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const [thumbnailView, setThumbnailView] = useState(false);
+  const showThumbnails = mode === "shot" && thumbnailView;
   useEffect(() => { dialog.current?.showModal(); }, []);
   return <dialog className="frame-dialog" ref={dialog} onClose={onClose} aria-label="Review enlarged still" onKeyDown={(event) => {
     if (event.key === "ArrowLeft" && hasPrevious) { event.preventDefault(); onMove(-1); }
     if (event.key === "ArrowRight" && hasNext) { event.preventDefault(); onMove(1); }
   }}>
     <div className="frame-dialog-header"><div><strong>{frame.videoName || "Candidate still"}</strong><span>{frame.timecode || ""} · {index >= 0 ? `${index + 1} of ${count}` : "Unselected candidate"} · {mode === "shot" ? `Shot ${frame.shotId ?? frame.shot ?? "unknown"}` : "Selected stills"}</span><span>Folder: {folder || "Project folder"}</span></div><ActionButton onClick={onClose}>Close ✕</ActionButton></div>
-    <div className="preview-navigation-mode" role="group" aria-label="Enlarged navigation"><button type="button" aria-pressed={mode === "selected"} onClick={() => onMode("selected")}>Selected stills</button><button type="button" aria-pressed={mode === "shot"} onClick={() => onMode("shot")}>Frames in this shot</button><span>← / → browse {mode === "shot" ? "all candidates in this shot" : "selected stills"}</span></div>
-    <div className="frame-dialog-image"><FrameImage frame={frame} /></div>
-    <div className="frame-dialog-actions"><ActionButton onClick={() => onMove(-1)} disabled={!hasPrevious}>← Previous</ActionButton><label className="preview-selection"><input type="checkbox" checked={selected} onChange={onToggle} /> Selected for delivery</label><ActionButton onClick={() => onMove(1)} disabled={!hasNext}>Next →</ActionButton></div>
+    <div className="preview-navigation-mode" role="group" aria-label="Enlarged navigation"><button type="button" aria-pressed={mode === "selected"} onClick={() => { onMode("selected"); setThumbnailView(false); }}>Selected stills</button><button type="button" aria-pressed={mode === "shot"} onClick={() => onMode("shot")}>Frames in this shot</button><span>← / → browse {mode === "shot" ? "all candidates in this shot" : "selected stills"}</span></div>
+    {mode === "shot" && <div className="shot-view-switch" role="group" aria-label="Shot display"><button type="button" aria-pressed={!showThumbnails} onClick={() => setThumbnailView(false)}>Enlarged image</button><button type="button" aria-pressed={showThumbnails} onClick={() => setThumbnailView(true)}>Thumbnails</button><span>{shotFrames.filter(candidate => selectedIds.has(frameKey(candidate))).length} selected in this shot</span></div>}
+    {showThumbnails ? <div className="shot-thumbnail-grid" role="region" aria-label="Frames in current shot"><VirtualFrameGrid items={shotFrames} sessionId={`${frame.videoId}:${frame.shotId ?? frame.shot ?? frame.id}`} render={(candidate, candidateIndex) => <div key={frameKey(candidate)} className={`frame-card shot-thumbnail ${selectedIds.has(frameKey(candidate)) ? "checked" : ""} ${frameKey(candidate) === frameKey(frame) ? "current" : ""}`}><div className="frame-image"><button type="button" className="frame-preview-trigger" aria-label={`Enlarge shot candidate ${candidateIndex + 1}`} onClick={() => { onChoose(frameKey(candidate)); setThumbnailView(false); }}><FrameImage frame={candidate} /><span className="frame-enlarge">Enlarge ↗</span></button><input type="checkbox" className="frame-select" aria-label={`Select shot candidate ${candidateIndex + 1}`} checked={selectedIds.has(frameKey(candidate))} onChange={() => onToggleFrame(frameKey(candidate))}/></div><div className="frame-info"><strong>Candidate {candidateIndex + 1}</strong><span>{candidate.timecode || `${candidate.timestampSec ?? ""}s`}</span><small>{selectedIds.has(frameKey(candidate)) ? "Selected for delivery" : "Not selected"}</small></div></div>} /></div> : <div className="frame-dialog-image"><FrameImage frame={frame} /></div>}
+
+    <div className="frame-dialog-actions"><ActionButton onClick={() => onMove(-1)} disabled={!hasPrevious}>← Previous</ActionButton><label className="preview-selection"><input type="checkbox" checked={selected} onChange={showThumbnails ? () => onToggleFrame(frameKey(frame)) : onToggle} /> Selected for delivery</label><ActionButton onClick={() => onMove(1)} disabled={!hasNext}>Next →</ActionButton></div>
   </dialog>;
 }
 
@@ -581,7 +586,7 @@ export default function App() {
           ) : <section className="welcome-panel"><span className="welcome-symbol">▣</span><span className="eyebrow">STILLS LIBRARY</span><h2>{initializing ? "Loading projects…" : "Ready when you are"}</h2><p>{initializing ? "Reading your project queue." : "Connect Google and choose your source folders in Setup, then refresh the queue."}</p><ActionButton variant="primary" onClick={() => setSettingsOpen(true)}>Open setup →</ActionButton></section>}
         </main>
       </div>
-      {previewFrame && session?.status === "awaiting_stills" && !session.deferred && <FramePreview frame={previewFrame} selected={checkedFrames.has(frameKey(previewFrame))} index={previewNav?.index ?? -1} count={previewNav?.count ?? 0} mode={previewMode} onMode={setPreviewMode} hasPrevious={Boolean(previewNav?.previous)} hasNext={Boolean(previewNav?.next)} folder={frameFolder(previewFrame)} onClose={() => setPreviewFrameId(undefined)} onMove={(offset) => { const next = offset < 0 ? previewNav?.previous : previewNav?.next; if (next) setPreviewFrameId(frameKey(next)); }} onToggle={() => {
+      {previewFrame && session?.status === "awaiting_stills" && !session.deferred && <FramePreview frame={previewFrame} selected={checkedFrames.has(frameKey(previewFrame))} index={previewNav?.index ?? -1} count={previewNav?.count ?? 0} mode={previewMode} onMode={setPreviewMode} hasPrevious={Boolean(previewNav?.previous)} hasNext={Boolean(previewNav?.next)} shotFrames={previewMode === "shot" ? previewNav?.candidates ?? [] : []} selectedIds={checkedFrames} onChoose={setPreviewFrameId} onToggleFrame={toggleFrame} folder={frameFolder(previewFrame)} onClose={() => setPreviewFrameId(undefined)} onMove={(offset) => { const next = offset < 0 ? previewNav?.previous : previewNav?.next; if (next) setPreviewFrameId(frameKey(next)); }} onToggle={() => {
         const id = frameKey(previewFrame);
         if (checkedFrames.has(id)) {
           // Resolve the next candidate before Approved only removes this one.
