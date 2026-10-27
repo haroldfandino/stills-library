@@ -20,7 +20,7 @@ export function projectSession(state: AppState, project: Pick<Project, 'id' | 's
 export function queueProjects(state: AppState): Project[] {
   return (state.projects ?? []).map(project => {
     const entry = state.batch?.entries.find(e => e.project.id === project.id && e.project.studio === project.studio);
-    if (!entry || project.status === 'Reviewed') return project;
+    if (!entry || project.status === 'Reviewed' || (entry.status === 'skipped' && project.status !== 'Skip')) return project;
     const status = { pending: 'To Do', running: 'In Process', done: 'Done', skipped: 'Skip', failed: 'In Process' }[entry.status];
     return { ...project, status };
   });

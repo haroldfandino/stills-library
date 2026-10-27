@@ -552,25 +552,30 @@ export class WorkflowService {
     return this.serial(async () => {
       const session = this.requireSession(sessionId);
       if (!(session.status === 'awaiting_videos'
+          || session.status === 'skipped'
           || (session.status === 'error' && session.lastPhase === 'discovering'))) {
         throw new Error('Choose a project source before approving videos.');
       }
-      const sourceRoot = await fs.realpath(this.store.get().config.sourceRoots[session.studio]);
       const folder = await fs.realpath(projectFolder);
       if (!(await fs.stat(folder)).isDirectory()) throw new Error('Selected project source is not a folder.');
-      const relative = path.relative(sourceRoot, folder);
-      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-        throw new Error('Project source must be a folder inside the configured studio source root.');
-      }
+      if (session.revision || uploadedItems(session).some(item => item.status !== 'planned')) throw new Error('Keep the existing source for a project with delivery records.');
       const expectedCode = codeFromName(session.projectName);
       const chosenCode = codeFromName(path.basename(folder));
       if (expectedCode && chosenCode && expectedCode !== chosenCode) {
         throw new Error(`Selected folder [${chosenCode}] does not match Stills project [${expectedCode}].`);
       }
+      if (session.status === 'skipped') {
+        const workspace = this.options.getWorkspace();
+        const row = await this.currentRow(workspace, session);
+        if (row.status !== 'Skip') throw new Error('The skipped spreadsheet row changed. Refresh projects before choosing its source.');
+        await workspace.updateStatus(row, 'To Do', 'Skip');
+        await this.setProjectStatus(session, 'To Do');
+      }
       const updated = await this.saveSession({ ...session,
         sourcePath: folder, manualSourcePath: folder,
         status: 'discovering', lastPhase: 'discovering', error: undefined,
         videos: [], frames: [], selectedVideoIds: [], selectedFrameIds: [],
+        analyses: undefined, exports: undefined, uploadResults: undefined, versionFolders: undefined,
         message: `Scanning the selected source folder: ${folder}.`,
       });
       return this.discover(updated, true);
@@ -969,7 +974,7 @@ export class WorkflowService {
       error: undefined, message: 'Checking access and finding delivery videos.' });
     try {
       const config = this.store.get().config;
-      if (!config.sourceRoots[current.studio]?.trim()) {
+      if (!current.manualSourcePath && !config.sourceRoots[current.studio]?.trim()) {
         throw new Error(`Choose the ${current.studio === 'filmkraft' ? 'Filmkraft' : 'Screenbridge'} source folder in Setup before preparing a project.`);
       }
       const workspace = this.options.getWorkspace();
@@ -983,7 +988,7 @@ export class WorkflowService {
       const ffprobePath = this.options.ffprobePath?.() ?? config.ffprobeExecutable;
       let found = current.manualSourcePath
         ? await this.functions.discoverProjectFolderVideos({
-          projectFolder: current.manualSourcePath, projectCode, ffprobePath,
+          projectFolder: current.manualSourcePath, projectCode, ffprobePath, scanSelectedFolder: true,
         })
         : projectCode
           ? await this.functions.discoverProjectVideos({

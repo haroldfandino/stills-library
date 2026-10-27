@@ -1144,7 +1144,9 @@ describe('WorkflowService approval and delivery', () => {
     expect(paused.status).toBe('error');
     expect(paused.error).toMatch(/Choose its project source folder/);
     expect(workspace.statusChanges).toEqual(['In Process']);
-    await expect(service.setProjectSource(paused.id, directory)).rejects.toThrow(/inside the configured studio source root/);
+    const outside = await service.setProjectSource(paused.id, directory);
+    expect(outside.status).toBe('awaiting_videos');
+    expect(outside.manualSourcePath).toBe(await fs.realpath(directory));
     const discovered = await service.setProjectSource(paused.id, selectedFolder);
     expect(discovered.status).toBe('awaiting_videos');
     expect(discovered.manualSourcePath).toBe(await fs.realpath(selectedFolder));
@@ -1161,5 +1163,18 @@ describe('WorkflowService approval and delivery', () => {
     expect(review.status).toBe('awaiting_videos');
     await expect(service.setProjectSource(review.id, wrongFolder)).rejects.toThrow(/does not match Stills project/);
     expect(service.getSession(review.id)?.status).toBe('awaiting_videos');
+  });
+
+  test('recovers a skipped project with a manually selected source and stops for video approval', async () => {
+    const { service, directory, workspace } = await setup();
+    const review = await service.prepare('screenbridge', '203SB');
+    await service.skip(review.id);
+    const chosen = path.join(directory, 'Selected final videos');
+    await fs.mkdir(chosen);
+    const recovered = await service.setProjectSource(review.id, chosen);
+    expect(recovered.status).toBe('awaiting_videos');
+    expect(recovered.manualSourcePath).toBe(await fs.realpath(chosen));
+    expect(workspace.statusChanges).toEqual(['In Process', 'Skip', 'To Do', 'In Process']);
+    expect(workspace.uploads).toBe(0);
   });
 });

@@ -312,8 +312,8 @@ async function dispatch(method: string, args: unknown[], origin: 'gui' | 'cli'):
       const session = service.getSession(sessionId);
       if (!session) throw new Error('Choose a project session first.');
       const pickerOptions: Electron.OpenDialogOptions = {
-        title: `Choose source project folder for ${session.projectName}`,
-        defaultPath: store.get().config.sourceRoots[session.studio],
+        title: `Choose final video folder for ${session.projectName}`,
+        defaultPath: session.manualSourcePath || session.sourcePath || store.get().config.sourceRoots[session.studio],
         properties: ['openDirectory'],
       };
       const chosen = window
@@ -321,11 +321,6 @@ async function dispatch(method: string, args: unknown[], origin: 'gui' | 'cli'):
         : await dialog.showOpenDialog(pickerOptions);
       if (chosen.canceled || !chosen.filePaths[0]) return service.getSession(sessionId);
       const folder = await fs.realpath(chosen.filePaths[0]);
-      const root = await fs.realpath(store.get().config.sourceRoots[session.studio]);
-      const relative = path.relative(root, folder);
-      if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-        throw new Error('Choose a project folder within the configured studio source root.');
-      }
       await service.setProjectSource(sessionId, folder);
       broadcast();
       return service.getSession(sessionId);

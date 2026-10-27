@@ -13,6 +13,12 @@ function state(status: 'pending' | 'running', sessionId?: string): AppState {
 }
 
 describe('retry presentation', () => {
+  it('shows the current sheet status after manually recovering an automatic missing-source skip', () => {
+    const value = state('running', 'retry');
+    value.batch!.entries[0].status = 'skipped';
+    value.projects![0] = { ...project, status: 'In Process' };
+    expect(queueProjects(value)[0].status).toBe('In Process');
+  });
   it('preserves a human Reviewed status over historical automatic delivery status', () => {
     const value = state('running', 'retry');
     value.batch!.entries[0].status = 'done';

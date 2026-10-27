@@ -48,6 +48,8 @@ export interface DiscoverOptions {
 
 export interface DiscoverProjectFolderOptions {
   projectFolder: string;
+  /** Explicit human choice may be the video folder itself, outside standard layouts. */
+  scanSelectedFolder?: boolean;
   ffprobePath?: string;
   /** Optional for no-code projects. A bracketed code in the folder name is inferred. */
   projectCode?: string;
@@ -276,11 +278,11 @@ export async function discoverProjectFolderVideos(options: DiscoverProjectFolder
   }
   const projectFolder = await realpath(selected);
   const code = options.projectCode ? normalizeProjectCode(options.projectCode) : folderCode(path.basename(projectFolder));
-  const deliveryFolder = await findDeliveryFolder(projectFolder);
+  const deliveryFolder = await findDeliveryFolder(projectFolder) ?? (options.scanSelectedFolder ? projectFolder : null);
   if (!deliveryFolder) return { projectFolder, deliveryFolder: null, videos: [], warnings: ['No supported client delivery video folder was found.'] };
   const warnings: string[] = [];
   let paths = await listVideoFiles(deliveryFolder);
-  if (code === '1289') {
+  if (code === '1289' && !options.scanSelectedFolder) {
     paths = paths.filter(file => path.relative(deliveryFolder, file).split(path.sep)[0].toLowerCase() === 'brand refresh');
   }
   if (!paths.length) warnings.push('No video files were found in the delivery folder.');

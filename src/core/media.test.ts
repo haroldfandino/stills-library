@@ -76,6 +76,21 @@ describe('project lookup', () => {
     expect(found.videos[0].channel).toBe('social');
     expect(found.videos[0].probeError).toBeTruthy();
   });
+
+  it('scans a manually selected video folder and subfolders without requiring a delivery layout', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'stills-manual-video-'));
+    temporary.push(root);
+    const chosen = path.join(root, 'Chosen final videos');
+    await mkdir(path.join(chosen, 'Vertical'), { recursive: true });
+    await writeFile(path.join(chosen, 'Final_30.mp4'), 'fixture');
+    await writeFile(path.join(chosen, 'Vertical', 'Final_15.MOV'), 'fixture');
+    await writeFile(path.join(root, 'Sibling-must-not-appear.mp4'), 'fixture');
+    const automatic = await discoverProjectFolderVideos({ projectFolder: chosen, ffprobePath: 'missing-ffprobe' });
+    expect(automatic.videos).toEqual([]);
+    const manual = await discoverProjectFolderVideos({ projectFolder: chosen, scanSelectedFolder: true, ffprobePath: 'missing-ffprobe' });
+    expect(manual.videos.map(v => v.name)).toEqual(['Final_30.mp4', 'Final_15.MOV']);
+    expect(manual.deliveryFolder).toBe(await realpath(chosen));
+  });
 });
 
 describe('video defaults', () => {
