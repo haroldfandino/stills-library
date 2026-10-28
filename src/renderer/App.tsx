@@ -1,3 +1,5 @@
+import { selectVideoDefaults } from '../core/video-suggestions';
+import type { VideoCandidate } from '../core/media';
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { AppState, Frame, Project, Session } from "./bridge";
@@ -7,7 +9,7 @@ import { ReviewHistory, type ReviewSelection } from "./review-history";
 import { previewNavigation, type PreviewMode } from "./preview-navigation";
 import { projectSession, queueProjects } from "./session-view";
 import { FolderSelectionPanel } from "./FolderSelectionPanel";
-import { folderSelectionIds, reviewFolders, toggleFolderChoice } from "./folder-selection";
+import { folderContains, folderSelectionIds, reviewFolders, toggleFolderChoice } from "./folder-selection";
 
 type QueueFilter = "All" | "To Do" | "In Process" | "Done" | "Reviewed" | "Skip";
 
@@ -171,6 +173,7 @@ export default function App() {
   const [draftError, setDraftError] = useState<string>();
   const histories = useRef(new Map<string, ReviewHistory>());
   const [uiError, setUiError] = useState<string>();
+  const [eligibleVideoIds, setEligibleVideoIds] = useState<Set<string>>(new Set());
   const [checkedVideos, setCheckedVideos] = useState<Set<string>>(new Set());
   const [checkedFrames, setCheckedFrames] = useState<Set<string>>(new Set());
   const [projectTag, setProjectTag] = useState("");
@@ -184,6 +187,7 @@ export default function App() {
   const reviewSaveRef = useRef<HTMLDivElement>(null);
   const projectListRef = useRef<HTMLDivElement>(null);
   const selectedProjectRowRef = useRef<HTMLButtonElement>(null);
+  const [videoFoldersOpen, setVideoFoldersOpen] = useState(false);
   const [skipVideosOpen, setSkipVideosOpen] = useState(false);
   const [folderSelectionOpen, setFolderSelectionOpen] = useState(false);
   const [foldersToUnselect, setFoldersToUnselect] = useState<Set<string>>(new Set());
@@ -193,7 +197,7 @@ export default function App() {
   const reviewSelection = useRef<ReviewSelection>({ frames: new Set(), skipped: {} });
   const [skippedVideoFrames, setSkippedVideoFrames] = useState<Record<string, string[]>>({});
   const [lastVideoSkip, setLastVideoSkip] = useState<{ sessionId: string; updatedAt?: string; videoCount: number; frameIds: string[]; videoIds: string[] }>();
-  useEffect(() => { setApprovedOnly(false); setReviewVideoId(""); setSkipVideosOpen(false); setVideosToSkip(new Set()); setLastVideoSkip(undefined); setFolderSelectionOpen(false); setFoldersToUnselect(new Set()); setFolderUnselectNotice(undefined); }, [selectedKey]);
+  useEffect(() => { setApprovedOnly(false); setVideoFoldersOpen(false); setReviewVideoId(""); setSkipVideosOpen(false); setVideosToSkip(new Set()); setLastVideoSkip(undefined); setFolderSelectionOpen(false); setFoldersToUnselect(new Set()); setFolderUnselectNotice(undefined); }, [selectedKey]);
   const [detail, setDetail] = useState<Session>();
 
   const refresh = useCallback(async () => {
@@ -315,6 +319,7 @@ export default function App() {
         .filter(([id, values]) => videos.has(id) && Array.isArray(values))
         .map(([id, values]) => [id, (values as unknown[]).filter((key): key is string => typeof key === 'string' && allowed.has(key))]));
     }
+    setEligibleVideoIds(new Set(Array.isArray(draft?.eligibleVideoIds) ? draft.eligibleVideoIds.filter((id: string) => videos.has(id)) : [...videos]));
     setCheckedVideos(new Set(Array.isArray(draft?.videoIds) ? draft.videoIds.filter((id: string) => videos.has(id)) : (session.videos ?? []).filter(video => video.selected).map(video => video.id)));
     const history = histories.current.get(draftIdentity) ?? new ReviewHistory();
     histories.current.set(draftIdentity, history);
@@ -334,11 +339,11 @@ export default function App() {
     if (!session || loadingDetail || hydratedDraft !== draftIdentity || !["awaiting_videos", "awaiting_stills"].includes(session.status)) return;
     try {
       localStorage.setItem(`stills-review-draft:${session.id}`, JSON.stringify({ sessionId: session.id, updatedAt: session.updatedAt,
-        frameIds: [...checkedFrames], videoIds: [...checkedVideos], skippedVideoFrames,
+        frameIds: [...checkedFrames], videoIds: [...checkedVideos], eligibleVideoIds: [...eligibleVideoIds], skippedVideoFrames,
         naming: { project: projectTag, type: typeTag, year: yearTag } }));
       setDraftError(undefined);
     } catch { setDraftError('The local draft could not be saved. Keep this review open until you save its changes to Drive.'); }
-  }, [draftIdentity, hydratedDraft, loadingDetail, session?.status, checkedFrames, checkedVideos, skippedVideoFrames, projectTag, typeTag, yearTag]);
+  }, [draftIdentity, hydratedDraft, loadingDetail, session?.status, checkedFrames, checkedVideos, eligibleVideoIds, skippedVideoFrames, projectTag, typeTag, yearTag]);
 
   const visibleProjects = projects.filter((project) => {
     if (filter !== "All" && project.status !== filter) return false;
@@ -359,6 +364,32 @@ export default function App() {
     else if (item.bottom > viewport.bottom) list.scrollTop += item.bottom - viewport.bottom;
   }, [selectedProjectKey, selectedProjectVisible, locateProjectRequest]);
   const counts = Object.fromEntries(FILTERS.map((item) => [item, item === "All" ? projects.length : projects.filter((project) => project.status === item).length]));
+  const videoFolderItems = (session?.videos ?? []).map(video => {
+    const directory = video.path.replaceAll('\\', '/').split('/').slice(0, -1).join('/');
+    const source = (session?.sourcePath ?? '').replaceAll('\\', '/').replace(/\/$/, '');
+    const delivery = /^(.*\/(?:01_VIDEOS|04_VIDEOS))(?:\/|$)/i.exec(directory)?.[1];
+    const root = delivery ?? source;
+    return { id: video.id, folder: root && (directory === root || directory.startsWith(root + '/')) ? directory.slice(root.length).replace(/^\//, '') : directory };
+  });
+  const videoFolderRows = reviewFolders(videoFolderItems, checkedVideos);
+  const suggestedVideoIds = (eligible: Set<string>) => {
+    const groups = new Map<string, VideoCandidate[]>();
+    for (const video of session?.videos ?? []) {
+      if (!eligible.has(video.id)) continue;
+      const folder = videoFolderItems.find(item => item.id === video.id)?.folder ?? '';
+      groups.set(folder, [...(groups.get(folder) ?? []), video as VideoCandidate]);
+    }
+    return new Set([...groups.values()].flatMap(videos => selectVideoDefaults(videos,
+      selectedProject?.code, session?.projectName ?? selectedProject?.name,
+    ).filter(video => video.selected).map(video => video.id)));
+  };
+  const currentVideoSuggestions = suggestedVideoIds(eligibleVideoIds);
+  const changeVideoFolder = (folder: string, select: boolean) => {
+    const next = new Set(eligibleVideoIds);
+    for (const video of videoFolderItems) if (folderContains(video.folder, folder)) { if (select) next.add(video.id); else next.delete(video.id); }
+    setEligibleVideoIds(next);
+    setCheckedVideos(suggestedVideoIds(next));
+  };
   const selectedFrames = (session?.frames ?? []).filter((frame) => checkedFrames.has(frameKey(frame)));
   const frameSelections = selectedFrames.map(frameKey);
   const availableFrames = (session?.frames ?? []).filter(frame => !frame.videoId || !Object.hasOwn(skippedVideoFrames, frame.videoId));
@@ -621,9 +652,10 @@ export default function App() {
 
               {loadingDetail && <section className="hero-card"><div className="spinner"/><h3>Loading saved review…</h3></section>}
               {session?.status === "awaiting_videos" && !session.deferred && !loadingDetail && <section className="review-section"><div className="section-heading"><div><span className="eyebrow">APPROVAL 01 / 02</span><h3>Choose videos</h3><p>Every discovered delivery file is listed below. The suggested cuts are preselected; adjust them before analysis.</p></div><div className="selection-count"><strong>{checkedVideos.size}</strong><span>of {session.videos?.length ?? 0} selected</span></div></div>
-                <div className="selection-actions"><ActionButton variant="quiet" onClick={() => setCheckedVideos(new Set((session.videos ?? []).filter(video => video.selected).map(video => video.id)))} disabled={Boolean(busy)}>Use suggestions</ActionButton><ActionButton variant="quiet" onClick={() => setCheckedVideos(new Set((session.videos ?? []).map(video => video.id)))} disabled={Boolean(busy)}>Select all</ActionButton><ActionButton variant="quiet" onClick={() => setCheckedVideos(new Set())} disabled={Boolean(busy)}>Clear selection</ActionButton></div>
+                <div className="selection-actions"><ActionButton variant="quiet" onClick={() => setCheckedVideos(currentVideoSuggestions)} disabled={Boolean(busy)}>Use suggestions</ActionButton><ActionButton variant="quiet" onClick={() => setCheckedVideos(new Set((session.videos ?? []).map(video => video.id)))} disabled={Boolean(busy)}>Select all</ActionButton><ActionButton variant="quiet" onClick={() => setCheckedVideos(new Set())} disabled={Boolean(busy)}>Clear selection</ActionButton><ActionButton onClick={() => setVideoFoldersOpen(value => !value)} disabled={Boolean(busy)}>Select by folder…</ActionButton></div>
+                {videoFoldersOpen && <section className="video-skip-panel" aria-label="Select videos by folder"><h4>Select videos by folder</h4><p>Include or exclude source folders. Suggestions rerun automatically within the included folders; analysis starts only after approval.</p><div className="video-skip-list">{videoFolderRows.map(folder => <div key={folder.path} style={{padding:'10px 0', borderBottom:'1px solid var(--line)'}}><strong title={folder.path || session.sourcePath}>{folder.path || "Delivery folder (all videos)"}</strong><div className="video-skip-tools"><small>{folder.approved} of {folder.total} videos suggested · {videoFolderItems.some(item => eligibleVideoIds.has(item.id) && folderContains(item.folder, folder.path)) ? "Folder included" : "Folder excluded"}</small><ActionButton onClick={() => changeVideoFolder(folder.path, true)} disabled={Boolean(busy)}>Select folder</ActionButton><ActionButton onClick={() => changeVideoFolder(folder.path, false)} disabled={Boolean(busy) || !videoFolderItems.some(item => eligibleVideoIds.has(item.id) && folderContains(item.folder, folder.path))}>Unselect folder</ActionButton></div></div>)}</div><ActionButton onClick={() => setVideoFoldersOpen(false)}>Done</ActionButton></section>}
                 {session.manualSourcePath && <div className="source-review-note"><strong>Manually selected source</strong><span>{session.manualSourcePath}</span><small>Confirm these videos belong to this Stills row before approval.</small></div>}
-                {session.videos?.length ? <div className="video-list">{session.videos.map((video) => <label className={`video-row ${checkedVideos.has(video.id) ? "checked" : ""}`} key={video.id}><input type="checkbox" checked={checkedVideos.has(video.id)} onChange={() => setCheckedVideos((previous) => { const next = new Set(previous); if (next.has(video.id)) next.delete(video.id); else next.add(video.id); return next; })} /><span className="custom-check" aria-hidden="true">✓</span><span className="video-content"><span className="video-top"><strong title={video.path}>{video.name || shortName(video.path)}</strong>{video.selected && <em>Suggested</em>}{video.skipReason && <em title={video.skipReason}>Name does not match project</em>}</span><span className="video-details"><span>{durationLabel(video.durationSec)}</span><span>{video.aspect || "Aspect unknown"}</span><span>{video.codec || video.format || "Format unknown"}</span>{video.width && video.height && <span>{video.width} × {video.height}</span>}{video.variant && <span>{video.variant}</span>}{video.channel && <span>{video.channel}</span>}{video.voiceover && <span>{video.voiceover}</span>}</span><span className="video-path" title={video.path}>{video.path}</span></span><button className="row-open" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); if (bridge) void perform("Showing video", () => bridge.revealPath(video.path)); }} title="Show video in Finder or Explorer" aria-label={`Open ${video.name || shortName(video.path)}`}>↗</button></label>)}</div> : <div className="empty-state"><strong>No videos found</strong><p>Check the delivery folder or source-root setup, then resume the scan.</p></div>}
+                {session.videos?.length ? <div className="video-list">{session.videos.map((video) => <label className={`video-row ${checkedVideos.has(video.id) ? "checked" : ""}`} key={video.id}><input type="checkbox" checked={checkedVideos.has(video.id)} onChange={() => setCheckedVideos((previous) => { const next = new Set(previous); if (next.has(video.id)) next.delete(video.id); else next.add(video.id); return next; })} /><span className="custom-check" aria-hidden="true">✓</span><span className="video-content"><span className="video-top"><strong title={video.path}>{video.name || shortName(video.path)}</strong>{currentVideoSuggestions.has(video.id) && <em>Suggested</em>}{video.skipReason && <em title={video.skipReason}>Name does not match project</em>}</span><span className="video-details"><span>{durationLabel(video.durationSec)}</span><span>{video.aspect || "Aspect unknown"}</span><span>{video.codec || video.format || "Format unknown"}</span>{video.width && video.height && <span>{video.width} × {video.height}</span>}{video.variant && <span>{video.variant}</span>}{video.channel && <span>{video.channel}</span>}{video.voiceover && <span>{video.voiceover}</span>}</span><span className="video-path" title={video.path}>{video.path}</span></span><button className="row-open" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); if (bridge) void perform("Showing video", () => bridge.revealPath(video.path)); }} title="Show video in Finder or Explorer" aria-label={`Open ${video.name || shortName(video.path)}`}>↗</button></label>)}</div> : <div className="empty-state"><strong>No videos found</strong><p>Check the delivery folder or source-root setup, then resume the scan.</p></div>}
                 {session.revision && <p className="revision-summary">{frameSelections.filter(id => !previousDeliveryIds.has(id)).length} to upload · {session.revision.uploads.filter(file => !frameSelections.includes(`${file.videoId}:${file.frameId}`)).length} to move to Drive Trash · Names will be numbered from 01.</p>}
                 <div className="review-footer"><span>Analysis begins only for the checked videos.</span><div>{!session.revision && <ActionButton variant="quiet" onClick={skipProject} disabled={Boolean(busy)}>Skip project</ActionButton>}<ActionButton variant="primary" onClick={() => bridge && void perform("Analyzing selected videos", () => bridge.approveVideos(session.id, [...checkedVideos]))} disabled={!bridge || !checkedVideos.size || Boolean(busy)}>Approve {checkedVideos.size} {checkedVideos.size === 1 ? "video" : "videos"} <span aria-hidden="true">→</span></ActionButton></div></div>
               </section>}
