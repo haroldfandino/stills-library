@@ -1239,3 +1239,66 @@ describe('WorkflowService approval and delivery', () => {
     expect(workspace.uploads).toBe(0);
   });
 });
+
+
+describe('recovering legacy Picker access failures', () => {
+  test('opens and resumes an existing review without waiting behind another project upload', async () => {
+    const fixture = await setup();
+    const prepared = await fixture.service.prepare('screenbridge', '203SB');
+    await fixture.service.setReviewOpen(prepared.id, false);
+    const gate = latch();
+    const slow = (fixture.service as any).serial(() => gate.promise);
+    try {
+      const resumed = await fixture.service.resume(prepared.id);
+      expect(resumed).toMatchObject({ status: 'awaiting_videos', deferred: false, updatedAt: prepared.updatedAt });
+      await fixture.service.setReviewOpen(prepared.id, false);
+      expect(fixture.service.getSession(prepared.id)?.deferred).toBe(true);
+      expect(fixture.counters).toEqual({ analyses: 0, exports: 0 });
+      expect(fixture.workspace.uploads).toBe(0);
+    } finally { gate.release(); await slow; }
+  });
+  test('resumes saved video discovery without waiting for another project or probing videos again', async () => {
+    let discoveries = 0;
+    const fixture = await setup(undefined, { discoverProjectVideos: async () => {
+      discoveries++;
+      return { projectFolder: '/saved', deliveryFolder: '/saved/delivery', warnings: [], videos: [{
+        id: 'cached', name: 'Airwaav_30.mp4', path: '/saved/Airwaav_30.mp4', durationSec: 30, aspect: 'horizontal',
+        codec: 'h264', format: 'mp4', variant: 'Main', selected: true, width: 1920, height: 1080,
+        channel: 'social', voiceover: 'none', declaredDurationSec: 30,
+      }] };
+    } });
+    const prepared = await fixture.service.prepare('screenbridge', '203SB');
+    await editSavedState(fixture.directory, data => {
+      const s = data.sessions.find(s => s.id === prepared.id)!;
+      s.status = 'error'; s.lastPhase = 'discovering'; s.error = 'Google Picker access is required for this project.'; s.deferred = true;
+    });
+    const loaded = await fixture.create();
+    const gate = latch();
+    const slow = (loaded as any).serial(() => gate.promise);
+    try {
+      const one = loaded.resume(prepared.id);
+      const duplicate = loaded.resume(prepared.id);
+      expect(duplicate).toBe(one);
+      const resumed = await one;
+      expect(resumed).toMatchObject({ status: 'awaiting_videos', deferred: false, error: undefined, selectedVideoIds: ['cached'] });
+      expect(discoveries).toBe(1);
+      expect(fixture.counters).toEqual({ analyses: 0, exports: 0 });
+      expect(fixture.workspace.uploads).toBe(0);
+    } finally { gate.release(); await slow; }
+  });
+  test('keeps other recovered projects closed and reports real access failures without losing cached videos', async () => {
+    const fixture = await setup();
+    const prepared = await fixture.service.prepare('screenbridge', '203SB');
+    await editSavedState(fixture.directory, data => {
+      const s = data.sessions.find(s => s.id === prepared.id)!;
+      s.status = 'error'; s.lastPhase = 'discovering'; s.error = 'Google Picker access is required.'; s.deferred = true;
+    });
+    const loaded = await fixture.create();
+    fixture.workspace.preflightProjectDestination = async () => { throw new Error('Destination year is ambiguous.'); };
+    const failed = await loaded.recoverDriveAccess(prepared.id);
+    expect(failed).toMatchObject({ status: 'error', deferred: true, error: 'Destination year is ambiguous.' });
+    expect(failed.videos).toEqual(prepared.videos);
+    expect(fixture.workspace.uploads).toBe(0);
+    expect(fixture.counters).toEqual({ analyses: 0, exports: 0 });
+  });
+});

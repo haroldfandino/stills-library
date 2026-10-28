@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { GoogleAuth } from './auth.js';
+import { assertLibraryFolder } from './write-boundary.js';
 import {
   GoogleApiError, GoogleConflictError, SOURCE_CONFIG,
   type DriveFile, type ProjectRow, type ProjectStatus,
@@ -81,16 +82,6 @@ function uniqueVersionFolder(files: DriveFile[], versionName: string): DriveFile
   return matches[0];
 }
 
-function requiresPicker(error: unknown): boolean {
-  return error instanceof GoogleApiError && (error.status === 403 || error.status === 404);
-}
-
-function assertAppAuthorized(file: DriveFile): void {
-  if (file.isAppAuthorized === false) {
-    throw new GoogleApiError(`Select ${file.name} in Google Picker to grant this app access.`, 403, 'picker_grant_required');
-  }
-}
-
 function checkGoogleUrl(value: string): URL {
   const url = new URL(value);
   if (url.protocol !== 'https:' || (url.hostname !== 'googleapis.com' && !url.hostname.endsWith('.googleapis.com'))) {
@@ -110,13 +101,13 @@ async function errorFromResponse(response: Response, endpoint: string): Promise<
   const details = Array.isArray(payload.errors) ? payload.errors : [];
   if (status === 403 && details.some(item => item && typeof item === 'object'
     && (item as Record<string, unknown>).reason === 'appNotAuthorizedToFile')) {
-    return new GoogleApiError('Select this file or folder in Google Picker to grant the app access.', 403, 'picker_grant_required', endpoint);
+    return new GoogleApiError('Sign in again and grant full Google Drive access.', 403, 'missing_required_scope', endpoint);
   }
   if (status === 403 && /insufficient|scope|permission/i.test(rawMessage)) {
-    return new GoogleApiError('Google denied this request. Reauthorize the app with Drive file and read-only metadata access, or verify edit permission.', 403, 'insufficient_scope_or_permission', endpoint);
+    return new GoogleApiError('Google denied this request. Sign in again with full Drive access, or verify account edit permission.', 403, 'insufficient_scope_or_permission', endpoint);
   }
   if (status === 404) {
-    return new GoogleApiError('Google file or folder is unavailable to this app. Select it in Google Picker or update its ID.', 404, 'not_found_or_not_granted', endpoint);
+    return new GoogleApiError('Google file or folder is unavailable. Verify its ID and the signed-in account’s access.', 404, 'not_found_or_not_granted', endpoint);
   }
   return new GoogleApiError(rawMessage, status, rawCode, endpoint);
 }
@@ -125,11 +116,10 @@ export class GoogleWorkspace {
   readonly sources: SourceConfigs;
   private readonly auth: GoogleAuth;
   private readonly fetchImpl: typeof fetch;
-  private readonly interactive: boolean;
   private readonly paceRequests: boolean;
+  private readonly uploadDestinations = new Map<string, string>();
 
   constructor(options: GoogleWorkspaceOptions) {
-    this.interactive = options.interactive !== false;
     this.paceRequests = !options.fetchImpl;
     this.auth = options.auth;
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -142,11 +132,49 @@ export class GoogleWorkspace {
     return value;
   }
 
+  private assertWritableFolder(id: string): Promise<void> {
+    return assertLibraryFolder(id, this.sources, id => this.getFile(id), id => this.listFolderFiles(id));
+  }
+
+  /** All writes pass here, including upload chunks, recovery, and 401 retries. */
+  private async checkWriteBoundary(url: URL, init: RequestInit): Promise<void> {
+    const method = (init.method ?? 'GET').toUpperCase();
+    if (method === 'GET' || method === 'HEAD') return;
+    const blocked = () => new GoogleApiError('Change blocked: this operation is outside the configured Stills Library destinations.', 403, 'outside_library');
+    if (url.hostname === 'sheets.googleapis.com') {
+      const match = /^\/v4\/spreadsheets\/([^/:]+)/.exec(url.pathname);
+      if (!match || !Object.values(this.sources).some(s => s.spreadsheetId === decodeURIComponent(match[1]))) throw blocked();
+      return; // Public Sheet methods restrict changes to Stills statuses/dropdowns.
+    }
+    if (url.hostname !== 'www.googleapis.com') throw blocked();
+    const uploadFolder = this.uploadDestinations.get(url.toString());
+    if (method === 'PUT' && uploadFolder) return this.assertWritableFolder(uploadFolder);
+    let body: Record<string, unknown>;
+    try { body = JSON.parse(String(init.body)); } catch { throw blocked(); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw blocked();
+    if (method === 'POST' && ['/drive/v3/files', '/upload/drive/v3/files'].includes(url.pathname)) {
+      if (!Array.isArray(body.parents) || body.parents.length !== 1 || typeof body.parents[0] !== 'string'
+          || !['image/png', FOLDER_MIME].includes(String(body.mimeType))
+          || Object.keys(body).some(key => !['name', 'mimeType', 'parents', 'appProperties'].includes(key))) throw blocked();
+      return this.assertWritableFolder(body.parents[0]);
+    }
+    const match = /^\/drive\/v3\/files\/([^/]+)$/.exec(url.pathname);
+    if (method !== 'PATCH' || !match || Object.keys(body).some(key => !['name', 'trashed'].includes(key))) throw blocked();
+    const file = await this.getFile(decodeURIComponent(match[1]));
+    if (file.id !== decodeURIComponent(match[1]) || file.parents?.length !== 1) throw blocked();
+    await this.assertWritableFolder(file.parents[0]);
+    const removed = url.searchParams.get('removeParents');
+    if (removed && removed !== file.parents[0]) throw blocked();
+    const added = url.searchParams.get('addParents');
+    if (added) await this.assertWritableFolder(added);
+  }
+
   private async request(url: string | URL, init: RequestInit = {}): Promise<Response> {
     const endpoint = checkGoogleUrl(String(url)).toString();
     const headers = new Headers(init.headers);
     headers.set('Authorization', `Bearer ${await this.auth.getAccessToken()}`);
     const send = async () => {
+      await this.checkWriteBoundary(new URL(endpoint), init);
       if (this.paceRequests && new URL(endpoint).hostname === 'sheets.googleapis.com') {
         sheetRequestQueue = sheetRequestQueue.catch(() => {}).then(async () => {
           const delay = nextSheetRequest - Date.now();
@@ -188,17 +216,14 @@ export class GoogleWorkspace {
         const sheet = await this.json<{ sheets?: { properties?: { title?: string } }[] }>(sheetUrl);
         if (!sheet.sheets?.some(item => item.properties?.title === 'Stills')) throw new Error('The spreadsheet has no Stills tab.');
         const sheetFile = await this.getFile(config.spreadsheetId);
-        assertAppAuthorized(sheetFile);
         if (sheetFile.capabilities?.canEdit === false) throw new Error('The signed-in account cannot edit the spreadsheet.');
         entry.sheetOk = true;
       } catch (error) {
         entry.sheetError = error instanceof Error ? error.message : String(error);
-        entry.requiresPicker ||= requiresPicker(error);
       }
       try {
         const folder = await this.getFile(config.destinationFolderId);
         if (folder.mimeType !== FOLDER_MIME) throw new Error('Configured Drive destination is not a folder.');
-        assertAppAuthorized(folder);
         if (folder.capabilities?.canAddChildren === false || folder.capabilities?.canListChildren === false) {
           throw new Error('The signed-in account cannot list or add files in the destination folder.');
         }
@@ -206,7 +231,6 @@ export class GoogleWorkspace {
         entry.folderName = folder.name;
       } catch (error) {
         entry.folderError = error instanceof Error ? error.message : String(error);
-        entry.requiresPicker ||= requiresPicker(error);
       }
       result[source] = entry;
     }
@@ -376,23 +400,17 @@ export class GoogleWorkspace {
     return targets;
   }
 
-  /** Opens an existing project/year folder in Picker before any write to it. */
+  /** Full Drive scope covers existing folders; underlying account permissions still apply. */
   async ensureFolderAuthorized(folderId: string): Promise<DriveFile> {
-    let folder = await this.getFile(folderId);
+    const folder = await this.getFile(folderId);
     if (folder.mimeType !== FOLDER_MIME) throw new GoogleApiError('Destination item is not a folder.', 422, 'not_a_folder');
-    if (folder.isAppAuthorized === false) {
-      if (!this.interactive) throw new Error(`Google Picker access is required for ${folder.name}. Sign in and grant folder access before retrying this project.`);
-      await this.auth.pickFiles({ fileIds: [folderId], allowFolders: true });
-      folder = await this.getFile(folderId);
-      assertAppAuthorized(folder);
-    }
     if (folder.capabilities?.canAddChildren === false || folder.capabilities?.canListChildren === false) {
       throw new GoogleApiError('The signed-in account cannot list and add files in this destination folder.', 403, 'cannot_write_folder');
     }
     return folder;
   }
 
-  /** Read-only destination lookup and Picker grant before moving a Sheet row to In Process. */
+  /** Read-only destination lookup before moving a Sheet row to In Process. */
   async preflightProjectDestination(source: SourceKey, projectName: string): Promise<void> {
     const name = projectName.trim();
     if (!name || name.includes('/') || name.includes('\\')) throw new Error('Invalid project folder name.');
@@ -649,6 +667,10 @@ export class GoogleWorkspace {
     const location = sessionResponse.headers.get('location');
     if (!location) throw new GoogleApiError('Drive did not return a resumable upload session.', 502, 'missing_upload_session');
     const sessionUrl = checkGoogleUrl(location);
+    if (sessionUrl.hostname !== 'www.googleapis.com' || !sessionUrl.pathname.startsWith('/upload/')) {
+      throw new GoogleApiError('Drive returned an unexpected upload endpoint.', 502, 'untrusted_upload_url');
+    }
+    this.uploadDestinations.set(sessionUrl.toString(), folderId);
     let offset = 0;
     let recoveryAttempts = 0;
     while (offset < bytes.length) {

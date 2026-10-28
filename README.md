@@ -24,13 +24,17 @@ Start-Process -FilePath '.\out\Stills Library-win32-x64\Stills Library.exe'
 In **Setup**:
 
 1. Follow [Google setup](docs/GOOGLE_SETUP.md), then choose **Import OAuth JSON** for the downloaded Google **Desktop app** credentials. Saving the desktop client ID directly is also supported.
-2. Choose **Sign in with Google**, sign in as `harold@filmkraft.tv`, and grant the requested existing Sheets and Drive folders in Google Picker. This app needs its own authorization; the ChatGPT Google Drive connection does not sign it in.
+2. Choose **Sign in with Google**, sign in as `harold@filmkraft.tv`, and approve full Google Drive access. Writes remain restricted to the configured stills folders and the two Stills spreadsheets; individual Picker grants are not needed. Existing per-file connections require signing in again once. This app needs its own authorization; the ChatGPT Google Drive connection does not sign it in.
 3. Choose the mounted **Filmkraft** and **Screenbridge** source folders on this computer. Windows starts with empty source locations so no macOS mount is assumed.
 4. Refresh the queue and prepare the first pilot project.
 
 Recovery state and staging are kept under `%APPDATA%\Stills Library`. Login and imported client credentials use Windows-protected encrypted storage. **Sign out** removes the saved login while keeping client setup and project recovery state.
 
 ## Supervised run
+
+Video suggestions automatically uncheck filenames that do not contain the project's client name (the first name segment after its bracketed code, before `_`). Matching ignores case and punctuation. For example, `[1278]Monarch_TVCampaign2025` matches `Monarch_30_Social.mp4`, but not `MMTBMYV130H.mov`. These videos remain visible with a reason and can be explicitly selected by a reviewer. The check happens before creative/format ranking, with no fallback to unrelated files.
+
+Resuming a saved Picker-blocked discovery now verifies full Drive access and reuses its saved video list without waiting for another project's long scan/upload or repeating media probes. It returns to video review; it never approves analysis or delivery. `refresh-videos SESSION_ID` reapplies current suggestions before video approval; `recover-drive-access SESSION_ID` rechecks a cached blocked discovery while retaining its open/closed review state.
 
 Start with Screenbridge **203SB Airwaav Brager**, then Filmkraft **1289 Net32 Brand Refresh**. Prepare one project; review every discovered delivery video and adjust the checked suggestions. Approving videos starts local analysis. Review candidate stills and their proposed filenames; approve the final selection to export and upload PNGs. The year is suggested from embedded video creation metadata, then file creation/modification dates; you can edit it before delivery. Each video’s actual last source frame is also preselected. A missing video, access error, or collision pauses the session for review. Use **Resume** after correcting the issue. In manual mode, choose **Skip** explicitly.
 
@@ -44,7 +48,7 @@ Projects with multiple creative video versions deliver into separate subfolders 
 
 `run-queue --approve-all --json` explicitly authorizes one snapshot of all **To Do** rows in both studios. It searches Active and Archived projects in both source roots, approves suggested videos and stills (including the last frame), fills naming/year defaults, and verifies uploads before marking Done. Only missing source folders or delivery videos are marked Skip. Technical failures remain In Process (or To Do if access failed before processing), are recorded as failures, and do not prevent later projects from running. Existing Done/Skip/In Process rows are listed separately and remain untouched.
 
-The app shows progress and **Open run report**. The HTML/JSON report records each outcome, year, counts and Drive destination. **Pause after this project** or `pause-queue` stops at a safe project boundary; **Resume automatic queue** or the same authorized CLI command continues it. Progress and authorization survive restarts. Closing the window keeps an active queue running, and the app prevents system sleep while processing. Source mount failures pause the queue. Missing Google Picker grants are reported as failures without waiting indefinitely for unattended interaction. While paused, `grant-queue-folders` opens Google Picker for existing queue destinations; `retry-queue --approve-all` or **Retry flagged projects** retries failures while keeping completed entries intact. Sheet requests are paced and quota rejections retried automatically.
+The app shows progress and **Open run report**. The HTML/JSON report records each outcome, year, counts and Drive destination. **Pause after this project** or `pause-queue` stops at a safe project boundary; **Resume automatic queue** or the same authorized CLI command continues it. Progress and authorization survive restarts. Closing the window keeps an active queue running, and the app prevents system sleep while processing. Source mount failures pause the queue. Account access failures are reported without waiting indefinitely for unattended interaction. `grant-queue-folders` now verifies access without opening Picker; `retry-queue --approve-all` or **Retry flagged projects** retries failures while keeping completed entries intact. Sheet requests are paced and quota rejections retried automatically.
 
 ## CLI
 

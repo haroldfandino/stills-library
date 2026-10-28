@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell, powerSaveBlocker } from 'electron';
@@ -105,36 +105,31 @@ async function initializeGoogle(): Promise<void> {
   auth = clientId ? new GoogleAuth({
     clientId, tokenStore, expectedEmail: 'harold@filmkraft.tv',
     clientSecret: credentials?.clientId === clientId ? credentials.clientSecret : undefined,
-    openBrowser: url => { authorizationUrl = url; return shell.openExternal(url); },
+    openBrowser: async url => {
+      authorizationUrl = url;
+      // Continue using Chrome for this desktop's Google authorization, without
+      // changing the user's system-wide default browser.
+      const chrome = process.platform === 'win32' ? [
+        path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        path.join(process.env.LOCALAPPDATA ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      ].find(existsSync) : undefined;
+      if (!chrome) return shell.openExternal(url);
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(chrome, [url], { detached: true, stdio: 'ignore' });
+        child.once('error', reject);
+        child.once('spawn', () => { child.unref(); resolve(); });
+      });
+    },
     timeoutMs: 600_000,
   }) : null;
 }
 
 async function confirmRoots(): Promise<void> {
   const workspace = currentWorkspace();
-  let roots = await workspace.verifyRoots();
-  if (Object.values(roots).some(root => root.requiresPicker)) {
-    if (!auth) throw new Error('Google sign-in is required.');
-    const fileIds = Object.values(workspace.sources).flatMap(item => [item.spreadsheetId, item.destinationFolderId]);
-    await auth.pickFiles({ fileIds, allowFolders: true, allowMultiple: true });
-    roots = await workspace.verifyRoots();
-  }
+  const roots = await workspace.verifyRoots();
   const failures = Object.values(roots).flatMap(root => [root.sheetOk ? '' : `${root.source} Stills sheet: ${root.sheetError}`,
     root.folderOk ? '' : `${root.source} destination: ${root.folderError}`]).filter(Boolean);
   if (failures.length) throw new Error(`Google access is incomplete. ${failures.join(' ')}`);
-  const nested = await workspace.destinationFolderGrantTargets();
-  const missing = nested.filter(folder => folder.isAppAuthorized === false);
-  if (missing.length) {
-    if (!auth) throw new Error('Google sign-in is required.');
-    await auth.pickFiles({ fileIds: missing.map(folder => folder.id), allowFolders: true, allowMultiple: true });
-    const notGranted: string[] = [];
-    for (const folder of missing) {
-      if ((await workspace.getFile(folder.id)).isAppAuthorized === false) notGranted.push(folder.name);
-    }
-    if (notGranted.length) {
-      throw new Error(`Google Picker did not grant Stills Library access to: ${notGranted.join(', ')}. Sign in again and select these folders.`);
-    }
-  }
 }
 
 async function allowedLocalPath(input: string): Promise<string> {
@@ -164,22 +159,8 @@ async function dispatch(method: string, args: unknown[], origin: 'gui' | 'cli'):
     case 'organizeRatios': return service.organizeRatios(String(args[0] ?? ''));
     case 'retryBatch': return service.retryBatchFailures();
     case 'grantQueueFolders': {
-      if (service.automaticRunning) throw new Error('Pause the automatic queue before granting folder access.');
-      if (!auth) throw new Error('Sign in first.');
-      const workspace = currentWorkspace();
-      const names = new Set(store.get().batch?.entries.filter(e => e.status !== 'done' && e.status !== 'skipped').map(e => e.project.name) ?? []);
-      const years = (await workspace.destinationFolderGrantTargets()).filter(folder => /^20\d{2}$/.test(folder.name));
-      const missing = [];
-      for (const year of years) {
-        for (const folder of await workspace.listFolderFiles(year.id)) {
-          if (names.has(folder.name) && folder.mimeType === 'application/vnd.google-apps.folder' && folder.isAppAuthorized === false) missing.push(folder);
-        }
-      }
-      if (missing.length) await auth.pickFiles({ fileIds: missing.map(f => f.id), allowFolders: true, allowMultiple: true });
-      const remaining = [];
-      for (const folder of missing) if ((await workspace.getFile(folder.id)).isAppAuthorized === false) remaining.push(folder.name);
-      if (remaining.length) throw new Error(`Folder access still missing: ${remaining.join(', ')}`);
-      return { granted: missing.map(f => f.name) };
+      await confirmRoots();
+      return { granted: [], message: 'Full Drive access is active; project-by-project Picker grants are no longer needed.' };
     }
     case 'startBatch': return service.startBatch(args[0] === true);
     case 'pauseBatch': return service.pauseBatch();
@@ -197,6 +178,8 @@ async function dispatch(method: string, args: unknown[], origin: 'gui' | 'cli'):
       if (origin !== 'gui') throw new Error('Skipping a project requires a reviewer in the GUI.');
       return service.skip(String(args[0] ?? ''));
     case 'resume': return service.resume(String(args[0] ?? ''));
+    case 'refreshVideoSelections': return service.refreshVideoSelections(String(args[0] ?? ''));
+    case 'recoverDriveAccess': return service.recoverDriveAccess(String(args[0] ?? ''));
     case 'getStatusSchema': return currentWorkspace().getStatusSchema();
     case 'createStartMenuShortcut': {
       if (process.platform !== 'win32' || !app.isPackaged) throw new Error('Start menu shortcuts require the packaged Windows app.');

@@ -13,6 +13,18 @@ function state(status: 'pending' | 'running', sessionId?: string): AppState {
 }
 
 describe('retry presentation', () => {
+  it.each(['failed', 'skipped', 'done'] as const)('keeps a recovered Done project reviewable over an old %s queue entry', status => {
+    const value = state('running', 'retry');
+    value.batch!.entries[0].status = status;
+    value.projects![0] = { ...project, status: 'Done' };
+    value.sessions![1] = { ...retry, status: 'done' };
+    expect(queueProjects(value)[0].status).toBe('Done');
+  });
+  it('continues showing an actively running retry as In Process', () => {
+    const value = state('running', 'retry');
+    value.projects![0] = { ...project, status: 'Done' };
+    expect(queueProjects(value)[0].status).toBe('In Process');
+  });
   it('shows the current sheet status after manually recovering an automatic missing-source skip', () => {
     const value = state('running', 'retry');
     value.batch!.entries[0].status = 'skipped';

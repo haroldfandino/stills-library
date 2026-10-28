@@ -7,7 +7,7 @@ import { reviewCapacity } from '../shared/review-capacity';
 import type { GoogleWorkspace } from '../google/workspace.js';
 import type { DriveFile, ProjectRow } from '../google/types.js';
 import {
-  discoverProjectVideos, discoverProjectFolderVideos, findProjectFolder, type VideoCandidate,
+  discoverProjectVideos, discoverProjectFolderVideos, findProjectFolder, selectVideoDefaults, type VideoCandidate,
 } from '../core/media.js';
 import {
   analyzeVideos, exportApprovedFrames, planRenames, stageAndRenameApprovedStills,
@@ -161,6 +161,7 @@ export class WorkflowService {
   private batchWorker?: Promise<void>;
   private reportChain: Promise<void> = Promise.resolve();
   private uploadChain: Promise<void> = Promise.resolve();
+  private accessRecoveries = new Map<string, Promise<Session>>();
   private deliveryMessages = new Map<string, string>();
   private deliveryMessage(id: string, message: string): void { this.deliveryMessages.set(id, message); this.notify(); }
   get automaticRunning(): boolean { return this.store.read(value => value.batch?.status === 'running'); }
@@ -375,7 +376,7 @@ export class WorkflowService {
         const folder = await findProjectFolder(root, sourceCode, p.name);
         if (!folder) continue;
         matches[0] = folder;
-        found = await this.functions.discoverProjectFolderVideos({ projectFolder: folder, projectCode: sourceCode,
+        found = await this.functions.discoverProjectFolderVideos({ projectFolder: folder, projectName: p.name, projectCode: sourceCode,
           ffprobePath: this.options.ffprobePath?.() ?? this.store.get().config.ffprobeExecutable });
         if (found.videos.length) break;
       }
@@ -431,7 +432,7 @@ export class WorkflowService {
         if (folder) { folders.push(folder); break; }
       }
       if (folders.length > 1) throw new Error('Multiple source folders match this project.');
-      const found = folders.length ? await this.functions.discoverProjectFolderVideos({ projectFolder: folders[0], projectCode: code,
+      const found = folders.length ? await this.functions.discoverProjectFolderVideos({ projectFolder: folders[0], projectName: p.name, projectCode: code,
         ffprobePath: this.options.ffprobePath?.() ?? this.store.get().config.ffprobeExecutable }) : undefined;
       if (!found?.videos.length) {
         session = await this.skipWork(session.id);
@@ -727,18 +728,20 @@ export class WorkflowService {
 
   setReviewOpen(sessionId: string, open: boolean): Promise<Session> {
     this.assertManualSession(sessionId);
-    return this.serial(async () => {
-      const session = this.requireSession(sessionId);
-      if (!['awaiting_videos', 'awaiting_stills', 'error'].includes(session.status)) throw new Error('Only a project waiting for human review can be opened or closed.');
-      if (open) this.assertReviewSlot(sessionId);
+    return (async () => {
       // Do not change updatedAt: local drafts are tied to this saved revision.
       await this.store.update(data => {
-        const saved = data.sessions.find(s => s.id === sessionId)!;
+        const saved = data.sessions.find(s => s.id === sessionId);
+        if (!saved || !['awaiting_videos', 'awaiting_stills', 'error'].includes(saved.status)) throw new Error('Only a project waiting for human review can be opened or closed.');
+        if (open && saved.deferred) {
+          const count = data.sessions.filter(s => s.id !== sessionId && !TERMINAL.has(s.status) && !s.deferred).length;
+          if (count >= reviewCapacity(totalmem())) throw new Error(`You can keep ${reviewCapacity(totalmem())} reviews open on this computer. Close a review to open another; its draft will be kept.`);
+        }
         saved.deferred = !open;
       });
       this.notify();
       return this.withPreviewUrls(this.requireSession(sessionId));
-    });
+    })();
   }
 
   setReviewed(studio: Studio, projectId: string, reviewed: boolean): Promise<void> {
@@ -793,6 +796,11 @@ export class WorkflowService {
 
   resume(sessionId: string): Promise<Session> {
     this.assertManualSession(sessionId);
+    const recovering = this.accessRecoveries.get(sessionId);
+    if (recovering) return recovering;
+    const session = this.requireSession(sessionId);
+    if (session.status === 'awaiting_videos' || session.status === 'awaiting_stills') return this.setReviewOpen(sessionId, true);
+    if (this.hasLegacyAccessFailure(session)) return this.recoverDriveAccess(sessionId, true);
     return this.serial(async () => {
       if (this.requireSession(sessionId).deferred) {
         this.assertReviewSlot(sessionId);
@@ -800,6 +808,66 @@ export class WorkflowService {
       }
       return this.resumeWork(sessionId);
     });
+  }
+
+  private hasLegacyAccessFailure(session: Session): boolean {
+    return session.status === 'error' && session.lastPhase === 'discovering'
+      && /Google Picker|picker_grant_required|The app closed before this step finished/i.test(session.error ?? '')
+      && session.videos.length > 0 && !session.frames.length && !session.analyses?.length
+      && !session.exports?.length && !session.uploadResults?.length && !session.revision;
+  }
+
+  /** Refresh suggestions only. No video analysis, exports, or Drive delivery. */
+  refreshVideoSelections(sessionId: string): Promise<Session> {
+    this.assertManualSession(sessionId);
+    return this.serial(async () => {
+      const session = this.requireSession(sessionId);
+      if (session.status !== 'awaiting_videos') throw new Error('Refresh video suggestions before approving videos.');
+      return this.saveVideoSuggestions(session);
+    });
+  }
+
+  private saveVideoSuggestions(session: Session): Promise<Session> {
+    const videos = selectVideoDefaults(session.videos as VideoCandidate[], codeFromName(session.projectName), session.projectName);
+    const skipped = videos.filter(v => v.skipReason).length;
+    return this.saveSession({ ...session, videos, selectedVideoIds: videos.filter(v => v.selected).map(v => v.id),
+      status: 'awaiting_videos', lastPhase: 'awaiting_videos', error: undefined,
+      message: `Review ${videos.length} delivery videos. ${skipped} automatically unchecked because their filenames do not include the project name.` });
+  }
+
+  /** Legacy access failures already have discovered videos. Recheck access
+   * without joining a long extraction/scan queue or repeating remote probes. */
+  recoverDriveAccess(sessionId: string, open = false): Promise<Session> {
+    this.assertManualSession(sessionId);
+    const inFlight = this.accessRecoveries.get(sessionId);
+    if (inFlight) return inFlight;
+    const work = (async () => {
+      const session = this.requireSession(sessionId);
+      if (!this.hasLegacyAccessFailure(session)) throw new Error('This project has no saved blocked or interrupted video discovery to recover.');
+      // Slot reservation happens inside the store's atomic update, not before
+      // an await. Closed background recoveries do not consume review slots.
+      await this.store.update(data => {
+        const current = data.sessions.find(s => s.id === sessionId)!;
+        if (open && current.deferred) {
+          const count = data.sessions.filter(s => s.id !== sessionId && !TERMINAL.has(s.status) && !s.deferred).length;
+          if (count >= reviewCapacity(totalmem())) throw new Error('Close a review to resume this project; its draft will be kept.');
+          current.deferred = false;
+        }
+      });
+      const current = await this.saveSession({ ...this.requireSession(sessionId), status: 'discovering', lastPhase: 'discovering', error: undefined,
+        message: 'Checking full Drive access; reusing the saved video discovery.' });
+      try {
+        const workspace = this.options.getWorkspace();
+        const access = (await workspace.verifyRoots())[current.studio];
+        if (!access?.sheetOk || !access.folderOk) throw new Error([access?.sheetError, access?.folderError].filter(Boolean).join(' ') || 'Google access is unavailable.');
+        await workspace.preflightProjectDestination(current.studio, current.projectName);
+        await this.ensureInProcess(workspace, current, true);
+        return await this.saveVideoSuggestions(current);
+      } catch (error) { return this.fail(this.requireSession(current.id), error, 'discovering'); }
+    })();
+    this.accessRecoveries.set(sessionId, work);
+    void work.finally(() => this.accessRecoveries.delete(sessionId)).catch(() => {});
+    return work;
   }
 
   private async resumeWork(sessionId: string, prepareOnly = false): Promise<Session> {
@@ -1023,7 +1091,7 @@ export class WorkflowService {
       const ffprobePath = this.options.ffprobePath?.() ?? config.ffprobeExecutable;
       let found = current.manualSourcePath
         ? await this.functions.discoverProjectFolderVideos({
-          projectFolder: current.manualSourcePath, projectCode, ffprobePath, scanSelectedFolder: true,
+          projectFolder: current.manualSourcePath, projectName: current.projectName, projectCode, ffprobePath, scanSelectedFolder: true,
         })
         : projectCode
           ? await this.functions.discoverProjectVideos({
@@ -1034,7 +1102,7 @@ export class WorkflowService {
         for (const source of config.additionalSources ?? []) {
           const folder = await findProjectFolder(source.path, projectCode, current.projectName);
           if (!folder) continue;
-          found = await this.functions.discoverProjectFolderVideos({ projectFolder: folder, projectCode, ffprobePath });
+          found = await this.functions.discoverProjectFolderVideos({ projectFolder: folder, projectName: current.projectName, projectCode, ffprobePath });
           if (found.videos.length) break;
         }
       }

@@ -1,11 +1,24 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  DEFAULT_GOOGLE_SCOPES, DRIVE_FILE_SCOPE, DRIVE_METADATA_SCOPE, GoogleAuth, MemoryGoogleTokenStore,
+  DEFAULT_GOOGLE_SCOPES, DRIVE_SCOPE, DRIVE_FILE_SCOPE, DRIVE_METADATA_SCOPE, GoogleAuth, MemoryGoogleTokenStore,
 } from './auth.js';
 
 const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
 describe('Google desktop OAuth', () => {
+  it('requires a new consent for legacy file-only tokens without deleting them or silently refreshing', async () => {
+    const tokenStore = new MemoryGoogleTokenStore();
+    const old = { accessToken: 'legacy', refreshToken: 'legacy-refresh', email: 'harold@filmkraft.tv', expiresAt: Date.now() + 3600000, scope: `${DRIVE_FILE_SCOPE} ${DRIVE_METADATA_SCOPE}` };
+    await tokenStore.save(old);
+    const fetchImpl = vi.fn();
+    const openBrowser = vi.fn();
+    const auth = new GoogleAuth({ clientId: 'desktop-client-id', tokenStore, fetchImpl, openBrowser });
+    expect(await auth.currentEmail()).toBeNull();
+    await expect(auth.getAccessToken()).rejects.toMatchObject({ code: 'missing_required_scope' });
+    expect(await tokenStore.load()).toEqual(old);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(openBrowser).not.toHaveBeenCalled();
+  });
   it('uses imported client configuration for both code exchange and refresh without placing its secret in the browser URL', async () => {
     const tokenStore = new MemoryGoogleTokenStore();
     const requests: URLSearchParams[] = [];
@@ -13,7 +26,7 @@ describe('Google desktop OAuth', () => {
       if (!String(input).includes('/token')) return json({ email: 'harold@filmkraft.tv', email_verified: true });
       requests.push(new URLSearchParams(String(init?.body)));
       return json({ access_token: `token-${requests.length}`, refresh_token: 'refresh', expires_in: 3600,
-        scope: `${DRIVE_FILE_SCOPE} ${DRIVE_METADATA_SCOPE}` });
+        scope: DRIVE_SCOPE });
     }) as unknown as typeof fetch;
     const auth = new GoogleAuth({ clientId: 'desktop-client-id', clientSecret: 'test-secret', tokenStore, fetchImpl,
       openBrowser: async value => {
@@ -33,7 +46,7 @@ describe('Google desktop OAuth', () => {
   it('ignores forged callback state and wrong methods, then accepts the real callback', async () => {
     const tokenStore = new MemoryGoogleTokenStore();
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => String(input).includes('/token')
-      ? json({ access_token: 'token', scope: `${DRIVE_FILE_SCOPE} ${DRIVE_METADATA_SCOPE}` })
+      ? json({ access_token: 'token', scope: DRIVE_SCOPE })
       : json({ email: 'harold@filmkraft.tv', email_verified: true })) as unknown as typeof fetch;
     const auth = new GoogleAuth({ clientId: 'desktop-client-id', tokenStore, fetchImpl,
       openBrowser: async value => {
@@ -57,7 +70,7 @@ describe('Google desktop OAuth', () => {
     await expect(fetch(redirect)).rejects.toThrow();
   });
 
-  it('uses a loopback PKCE login and a separate drive.file-only Picker request', async () => {
+  it('requests full Drive access through loopback PKCE without opening a picker', async () => {
     const seenScopes: string[][] = [];
     const tokenStore = new MemoryGoogleTokenStore();
     const openBrowser = vi.fn(async (value: string) => {
@@ -76,13 +89,14 @@ describe('Google desktop OAuth', () => {
       await fetch(callback);
     });
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input).includes('/token')) return json({ access_token: 'token', refresh_token: 'refresh', expires_in: 3600, scope: `${DRIVE_FILE_SCOPE} ${DRIVE_METADATA_SCOPE}` });
+      if (String(input).includes('/token')) return json({ access_token: 'token', refresh_token: 'refresh', expires_in: 3600, scope: DRIVE_SCOPE });
       return json({ email: 'harold@filmkraft.tv', email_verified: true });
     }) as unknown as typeof fetch;
     const auth = new GoogleAuth({ clientId: 'desktop-client-id', tokenStore, openBrowser, fetchImpl });
     expect(await auth.signIn()).toBe('harold@filmkraft.tv');
-    expect(await auth.pickFiles({ fileIds: ['sheet-id', 'folder-id'], allowFolders: true, allowMultiple: true })).toEqual(['sheet-id', 'folder-id']);
-    expect(seenScopes).toEqual([[...DEFAULT_GOOGLE_SCOPES], [DRIVE_FILE_SCOPE]]);
+    expect(seenScopes).toEqual([[...DEFAULT_GOOGLE_SCOPES]]);
+    expect(seenScopes[0]).toContain(DRIVE_SCOPE);
+    expect(openBrowser).toHaveBeenCalledTimes(1);
     expect(await auth.currentEmail()).toBe('harold@filmkraft.tv');
     expect(await auth.getAccessToken()).toBe('token');
   });
@@ -97,7 +111,7 @@ describe('Google desktop OAuth', () => {
       await fetch(callback);
     };
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) =>
-      String(input).includes('/token') ? json({ access_token: 'token', refresh_token: 'refresh', expires_in: 3600, scope: `${DRIVE_FILE_SCOPE} ${DRIVE_METADATA_SCOPE}` })
+      String(input).includes('/token') ? json({ access_token: 'token', refresh_token: 'refresh', expires_in: 3600, scope: DRIVE_SCOPE })
         : json({ email: 'someone@example.com', email_verified: true })) as unknown as typeof fetch;
     const auth = new GoogleAuth({ clientId: 'desktop-client-id', tokenStore, openBrowser, fetchImpl });
     await expect(auth.signIn()).rejects.toMatchObject({ code: 'wrong_account' });

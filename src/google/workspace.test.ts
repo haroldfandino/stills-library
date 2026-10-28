@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { GoogleAuth } from './auth.js';
-import { GoogleConflictError, SOURCE_CONFIG, type DriveFile, type ProjectRow } from './types.js';
+import { GoogleConflictError, SOURCE_CONFIG, type DriveFile, type ProjectRow, type SourceConfigs } from './types.js';
 import { GoogleWorkspace } from './workspace.js';
 
 const auth = { getAccessToken: async () => 'test-token' } as GoogleAuth;
@@ -58,13 +58,15 @@ it('adds Reviewed to both status dropdowns preserving existing choices and valid
   await workspace.ensureReviewedStatusOptions();
   expect(writes).toHaveLength(2);
 });
+const sourcesFor = (id: string): SourceConfigs => ({ filmkraft: { ...SOURCE_CONFIG.filmkraft, destinationFolderId: id }, screenbridge: { ...SOURCE_CONFIG.screenbridge, destinationFolderId: id } });
 const uploadId = '11111111-1111-4111-8111-111111111111';
 
 function versionFixture() {
   const folderMime = 'application/vnd.google-apps.folder';
   const versionName = '02_Mustela_Baby_Caf\u00e9';
   const files = new Map<string, DriveFile & { trashed?: boolean }>([
-    ['project', { id: 'project', name: '[1400]Mustela_2026', mimeType: folderMime, isAppAuthorized: true }],
+    ['root', { id: 'root', name: '01_Stills', mimeType: folderMime }],
+    ['project', { id: 'project', name: '[1400]Mustela_2026', mimeType: folderMime, parents: ['root'], isAppAuthorized: true }],
     ['version', { id: 'version', name: versionName, mimeType: folderMime, parents: ['project'], isAppAuthorized: true }],
   ]);
   const writes: { name: string; mimeType: string; parents: string[] }[] = [];
@@ -91,7 +93,7 @@ function versionFixture() {
     return item ? json(item) : json({ error: { message: 'Not found' } }, 404);
   }) as unknown as typeof fetch;
   const pickerAuth = { getAccessToken: async () => 'test-token', pickFiles } as unknown as GoogleAuth;
-  return { files, writes, pickFiles, versionName, workspace: new GoogleWorkspace({ auth: pickerAuth, fetchImpl }) };
+  return { files, writes, pickFiles, versionName, workspace: new GoogleWorkspace({ auth: pickerAuth, fetchImpl, sources: sourcesFor('root') }) };
 }
 
 describe('creative-version Drive destinations', () => {
@@ -152,32 +154,13 @@ describe('creative-version Drive destinations', () => {
     expect(fixture.writes).toEqual([]);
   });
 
-  it('grants existing folders through Picker and checks their route afterward', async () => {
+  it('uses full Drive access for existing versions without Picker and still detects moved folders', async () => {
     const fixture = versionFixture();
     fixture.files.get('project')!.isAppAuthorized = false;
     fixture.files.get('version')!.isAppAuthorized = false;
     await fixture.workspace.ensureVersionDestination('project', fixture.versionName);
-    expect(fixture.pickFiles.mock.calls.map(([input]) => input.fileIds)).toEqual([['project'], ['version']]);
-    expect(fixture.writes).toEqual([]);
-
-    fixture.files.get('version')!.isAppAuthorized = false;
-    fixture.pickFiles.mockImplementation(async ({ fileIds }) => {
-      fixture.files.get('version')!.isAppAuthorized = true;
-      fixture.files.get('version')!.parents = ['different-project'];
-      return fileIds;
-    });
-    await expect(fixture.workspace.verifyVersionDestination('project', fixture.versionName, 'version')).rejects.toBeInstanceOf(GoogleConflictError);
-    expect(fixture.writes).toEqual([]);
-  });
-
-  it('rechecks uniqueness when another folder appears during Picker', async () => {
-    const fixture = versionFixture();
-    fixture.files.get('version')!.isAppAuthorized = false;
-    fixture.pickFiles.mockImplementation(async ({ fileIds }) => {
-      fixture.files.get('version')!.isAppAuthorized = true;
-      fixture.files.set('duplicate', { ...fixture.files.get('version')!, id: 'duplicate' });
-      return fileIds;
-    });
+    expect(fixture.pickFiles).not.toHaveBeenCalled();
+    fixture.files.get('version')!.parents = ['different-project'];
     await expect(fixture.workspace.verifyVersionDestination('project', fixture.versionName, 'version')).rejects.toBeInstanceOf(GoogleConflictError);
     expect(fixture.writes).toEqual([]);
   });
@@ -249,7 +232,7 @@ describe('GoogleWorkspace safety rules', () => {
     await expect(incomplete.listFolderFiles('folder')).rejects.toMatchObject({ code: 'incomplete_listing' });
   });
 
-  it('requires Picker when metadata is readable but the app lacks the destination grant', async () => {
+  it('accepts full Drive access even when per-file grants are absent', async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('sheets.googleapis.com')) return json({ sheets: [{ properties: { title: 'Stills' } }] });
@@ -259,28 +242,23 @@ describe('GoogleWorkspace safety rules', () => {
     }) as unknown as typeof fetch;
     const workspace = new GoogleWorkspace({ auth, fetchImpl });
     const roots = await workspace.verifyRoots();
-    expect(roots.screenbridge.folderOk).toBe(false);
-    expect(roots.screenbridge.requiresPicker).toBe(true);
-    expect(roots.filmkraft.folderOk).toBe(false);
+    expect(roots.screenbridge.folderOk).toBe(true);
+    expect(roots.screenbridge.requiresPicker).toBe(false);
+    expect(roots.filmkraft.folderOk).toBe(true);
   });
 
-  it('checks the target folder app grant again after Picker', async () => {
-    let granted = false;
-    const pickFiles = vi.fn(async () => { granted = true; return ['year-folder']; });
+  it('checks account capabilities without opening Picker', async () => {
+    const pickFiles = vi.fn();
     const pickerAuth = { getAccessToken: async () => 'test-token', pickFiles } as unknown as GoogleAuth;
+    let canAddChildren = true;
     const fetchImpl = vi.fn(async () => json({ id: 'year-folder', name: '2026',
-      mimeType: 'application/vnd.google-apps.folder', isAppAuthorized: granted,
-      capabilities: { canAddChildren: true, canListChildren: true } })) as unknown as typeof fetch;
+      mimeType: 'application/vnd.google-apps.folder', isAppAuthorized: false,
+      capabilities: { canAddChildren, canListChildren: true } })) as unknown as typeof fetch;
     const workspace = new GoogleWorkspace({ auth: pickerAuth, fetchImpl });
     expect((await workspace.ensureFolderAuthorized('year-folder')).id).toBe('year-folder');
-    expect(pickFiles).toHaveBeenCalledWith({ fileIds: ['year-folder'], allowFolders: true });
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-
-    granted = false;
-    const ignoredPicker = { getAccessToken: async () => 'test-token',
-      pickFiles: vi.fn(async () => ['year-folder']) } as unknown as GoogleAuth;
-    await expect(new GoogleWorkspace({ auth: ignoredPicker, fetchImpl }).ensureFolderAuthorized('year-folder'))
-      .rejects.toMatchObject({ code: 'picker_grant_required' });
+    canAddChildren = false;
+    await expect(workspace.ensureFolderAuthorized('year-folder')).rejects.toThrow('cannot list and add');
+    expect(pickFiles).not.toHaveBeenCalled();
   });
 
   it('preflights an exact existing project folder before any Sheet status write', async () => {
@@ -310,7 +288,7 @@ describe('GoogleWorkspace safety rules', () => {
       screenbridge: { ...SOURCE_CONFIG.screenbridge, destinationFolderId: 'root' },
     } });
     await workspace.preflightProjectDestination('screenbridge', project.name);
-    expect(pickFiles).toHaveBeenCalledWith({ fileIds: ['project-folder'], allowFolders: true });
+    expect(pickFiles).not.toHaveBeenCalled();
   });
 
   it('rejects a saved project folder moved outside the configured year hierarchy', async () => {
@@ -362,10 +340,10 @@ describe('GoogleWorkspace safety rules', () => {
       if (url.includes('/drive/v3/files/folder')) return json({ id: 'folder', name: '2026', mimeType: 'application/vnd.google-apps.folder' });
       return json({ files: [] });
     }) as unknown as typeof fetch;
-    const workspace = new GoogleWorkspace({ auth, fetchImpl });
+    const workspace = new GoogleWorkspace({ auth, fetchImpl, sources: sourcesFor('folder') });
     const uploaded = await workspace.uploadPng({ folderId: 'folder', filePath, fileName: 'Test.png', uploadId });
     expect(uploaded.id).toBe('new-file');
-    expect(fetchImpl).toHaveBeenCalledTimes(5);
+    expect(fetchImpl).toHaveBeenCalledTimes(7);
   });
 
   it('recovers a lost final upload response by querying the resumable session', async () => {
@@ -387,16 +365,16 @@ describe('GoogleWorkspace safety rules', () => {
       if (url.includes('/drive/v3/files/folder')) return json({ id: 'folder', name: '2026', mimeType: 'application/vnd.google-apps.folder' });
       return json({ files: [] });
     }) as unknown as typeof fetch;
-    const workspace = new GoogleWorkspace({ auth, fetchImpl });
+    const workspace = new GoogleWorkspace({ auth, fetchImpl, sources: sourcesFor('folder') });
     expect((await workspace.uploadPng({ folderId: 'folder', filePath, fileName: 'Test.png', uploadId })).id).toBe('recovered-file');
   });
 
   it('creates exact project folders only under an explicitly chosen 01_Stills year', async () => {
-    const folders: Record<string, { id: string; name: string; mimeType: string }> = {
+    const folders: Record<string, { id: string; name: string; mimeType: string; parents?: string[] }> = {
       [SOURCE_CONFIG.screenbridge.destinationFolderId]: { id: SOURCE_CONFIG.screenbridge.destinationFolderId, name: '01_SB_Still&Video Library', mimeType: 'application/vnd.google-apps.folder' },
-      stills: { id: 'stills', name: '01_Stills', mimeType: 'application/vnd.google-apps.folder' },
+      stills: { id: 'stills', name: '01_Stills', mimeType: 'application/vnd.google-apps.folder', parents: [SOURCE_CONFIG.screenbridge.destinationFolderId] },
       y2025: { id: 'y2025', name: '2025', mimeType: 'application/vnd.google-apps.folder' },
-      y2026: { id: 'y2026', name: '2026', mimeType: 'application/vnd.google-apps.folder' },
+      y2026: { id: 'y2026', name: '2026', mimeType: 'application/vnd.google-apps.folder', parents: ['stills'] },
     };
     const created: { name: string; parents: string[] }[] = [];
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -433,12 +411,14 @@ describe('explicit organization of verified PNGs', () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (init?.method === 'PATCH') { writes.push(url); parent = url.searchParams.get('addParents')!; return json({}); }
+      if (url.pathname.endsWith('/root')) return json({ id: 'root', name: '01_Stills', mimeType: 'application/vnd.google-apps.folder' });
+      if (url.pathname.endsWith('/old')) return json({ id: 'old', name: 'Old', mimeType: 'application/vnd.google-apps.folder', parents: ['root'] });
       if (url.pathname.endsWith('/folder')) return json({ id: 'folder', name: 'folder', mimeType: 'application/vnd.google-apps.folder', isAppAuthorized: true, capabilities: { canListChildren: true } });
       if (url.pathname.endsWith('/files')) return json({ files: conflict ? [{ id: 'other', name: 'still.png' }] : [] });
-      if (url.pathname.endsWith('/new')) return json({ id: 'new', name: 'Square', mimeType: 'application/vnd.google-apps.folder', isAppAuthorized: true });
+      if (url.pathname.endsWith('/new')) return json({ id: 'new', name: 'Square', mimeType: 'application/vnd.google-apps.folder', parents: ['root'], isAppAuthorized: true });
       return json({ id: 'png', name: 'still.png', mimeType: 'image/png', parents: [parent], size: '10', md5Checksum: 'abc', appProperties: { stillsLibraryUploadId: uploadId } });
     }) as unknown as typeof fetch;
-    return { workspace: new GoogleWorkspace({ auth, fetchImpl }), writes, conflict: () => { conflict = true; }, moved: () => { parent = 'new'; } };
+    return { workspace: new GoogleWorkspace({ auth, fetchImpl, sources: sourcesFor('root') }), writes, conflict: () => { conflict = true; }, moved: () => { parent = 'new'; } };
   }
   it('moves only the verified file and can recover an already-completed remote move', async () => {
     const f = fixture();
@@ -463,7 +443,7 @@ describe('verified delivery revisions', () => {
     const file = { id: 'png', name: 'old.png', mimeType: 'image/png', parents: ['folder'], size: '7', md5Checksum: 'abc', appProperties: { stillsLibraryUploadId: uploadId }, trashed: false };
     let writes = 0;
     let conflict = false;
-    const workspace = new GoogleWorkspace({ auth, fetchImpl: (async (input, init) => {
+    const workspace = new GoogleWorkspace({ auth, sources: sourcesFor('folder'), fetchImpl: (async (input, init) => {
       const url = new URL(String(input));
       if (init?.method === 'PATCH') {
         expect(url.searchParams.get('supportsAllDrives')).toBe('true');
@@ -471,7 +451,7 @@ describe('verified delivery revisions', () => {
         Object.assign(file, JSON.parse(String(init.body)));
         return json(file);
       }
-      if (url.pathname.endsWith('/folder')) return json({ id: 'folder', name: 'folder', mimeType: 'application/vnd.google-apps.folder', isAppAuthorized: true, capabilities: { canListChildren: true } });
+      if (url.pathname.endsWith('/folder')) return json({ id: 'folder', name: '01_Stills', mimeType: 'application/vnd.google-apps.folder', isAppAuthorized: true, capabilities: { canListChildren: true } });
       if (url.pathname.endsWith('/files')) return json({ files: conflict ? [{ ...file, id: 'foreign', name: 'new.png' }] : [file] });
       return json(file);
     }) as typeof fetch });
@@ -496,13 +476,14 @@ describe('empty delivery folder cleanup', () => {
   it('keeps folders with other items and trashes only the exact empty folder, idempotently', async () => {
     const folder = { id: 'version', name: 'Video', mimeType: 'application/vnd.google-apps.folder', parents: ['project'], trashed: false };
     let occupied = true, writes = 0;
-    const workspace = new GoogleWorkspace({ auth, fetchImpl: (async (input, init) => {
+    const workspace = new GoogleWorkspace({ auth, sources: sourcesFor('project'), fetchImpl: (async (input, init) => {
       const url = new URL(String(input));
       if (init?.method === 'PATCH') {
         writes++;
         expect(JSON.parse(String(init.body))).toEqual({ trashed: true });
         folder.trashed = true;
       }
+      if (url.pathname.endsWith('/project')) return json({ id: 'project', name: '01_Stills', mimeType: 'application/vnd.google-apps.folder' });
       if (url.pathname.endsWith('/files')) return json({ files: occupied ? [{ id: 'foreign', name: 'notes.txt' }] : [] });
       return json(folder);
     }) as typeof fetch });

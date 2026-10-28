@@ -5,7 +5,7 @@ import { rpcCall } from './service/rpc';
 import { developmentElectron } from './shared/tool-paths';
 
 function usage(): never {
-  process.stderr.write(`Stills Library CLI\n\nCommands:\n  run-queue --approve-all [--json]\n  pause-queue\n  retry-queue --approve-all [--json]\n  organize-ratios <completed-session-id> [--json]\n  grant-queue-folders\n  authorization-url\n  projects [--json]\n  prepare <filmkraft|screenbridge> <project-id> [--json]\n  status [session-id] [--json]\n  resume <session-id> [--json]\n  review-again <session-id> [--json]\n  login\n  logout\n  configure-google <desktop-oauth-client-id>\n  import-google <desktop-oauth-json-file>\n  set-source <filmkraft|screenbridge> <folder>\n  set-project-source <session-id> <folder>\n`);
+  process.stderr.write(`Stills Library CLI\n\nCommands:\n  run-queue --approve-all [--json]\n  pause-queue\n  retry-queue --approve-all [--json]\n  organize-ratios <completed-session-id> [--json]\n  grant-queue-folders\n  authorization-url\n  projects [--json]\n  prepare <filmkraft|screenbridge> <project-id> [--json]\n  status [session-id] [--json]\n  resume <session-id> [--json]\n  refresh-videos <session-id> [--json]\n  recover-drive-access <session-id> [--json]\n  review-again <session-id> [--json]\n  login\n  logout\n  configure-google <desktop-oauth-client-id>\n  import-google <desktop-oauth-json-file>\n  set-source <filmkraft|screenbridge> <folder>\n  set-project-source <session-id> <folder>\n`);
   process.exit(2);
 }
 
@@ -91,6 +91,12 @@ async function main() {
     case 'resume':
       if (!args[0]) usage();
       result = await call('resume', [args[0]]); break;
+    case 'refresh-videos':
+      if (!args[0]) usage();
+      result = await call('refreshVideoSelections', [args[0]]); break;
+    case 'recover-drive-access':
+      if (!args[0]) usage();
+      result = await call('recoverDriveAccess', [args[0]]); break;
     case 'review-again':
       if (!args[0]) usage();
       result = await call('reviewAgain', [args[0]]); break;

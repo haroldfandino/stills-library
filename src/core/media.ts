@@ -27,6 +27,7 @@ export interface VideoCandidate {
   voiceover: Voiceover;
   declaredDurationSec: number | null;
   probeError?: string;
+  skipReason?: string;
   createdAt?: string;
   fileCreatedAt?: string;
   fileModifiedAt?: string;
@@ -48,6 +49,7 @@ export interface DiscoverOptions {
 
 export interface DiscoverProjectFolderOptions {
   projectFolder: string;
+  projectName?: string;
   /** Explicit human choice may be the video folder itself, outside standard layouts. */
   scanSelectedFolder?: boolean;
   ffprobePath?: string;
@@ -235,10 +237,18 @@ function comparePreference(a: VideoCandidate, b: VideoCandidate): number {
 }
 
 /** Return a fresh array; the UI can change any checkbox before analysis. */
-export function selectVideoDefaults(videos: VideoCandidate[], projectCode?: string): VideoCandidate[] {
+export function projectVideoName(projectName: string): string {
+  return projectName.replace(/^\[[^\]]+\]/, '').replace(/^[_\s-]+/, '').split('_')[0].trim();
+}
+
+export function selectVideoDefaults(videos: VideoCandidate[], projectCode?: string, projectName?: string): VideoCandidate[] {
   const net32 = projectCode ? normalizeProjectCode(projectCode) === '1289' : false;
+  const label = projectName ? projectVideoName(projectName) : '';
+  const normalize = (value: string) => value.normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
+  const matches = (video: VideoCandidate) => !label || normalize(path.parse(video.name).name).includes(normalize(label));
   const groups = new Map<string, VideoCandidate[]>();
   for (const video of videos) {
+    if (!matches(video)) continue;
     if (video.probeError || video.aspect === 'unknown' || video.durationSec <= 0) continue;
     if (net32 && !['A', 'B'].includes(video.variant)) continue;
     const key = `${video.variant.toLowerCase()}|${video.aspect}`;
@@ -260,14 +270,15 @@ export function selectVideoDefaults(videos: VideoCandidate[], projectCode?: stri
     candidates.sort((a, b) => comparePreference(b, a));
     selected.add(candidates[0].id);
   }
-  return videos.map(video => ({ ...video, selected: selected.has(video.id) }));
+  return videos.map(video => ({ ...video, selected: selected.has(video.id),
+    skipReason: matches(video) ? undefined : `Skipped: filename does not include ${label}.` }));
 }
 
 export async function discoverProjectVideos(options: DiscoverOptions): Promise<VideoDiscovery> {
   const code = normalizeProjectCode(options.projectCode);
   const projectFolder = await findProjectFolder(options.sourceRoot, code, options.projectName);
   if (!projectFolder) return { projectFolder: null, deliveryFolder: null, videos: [], warnings: [`Project folder [${code}] was not found.`] };
-  return discoverProjectFolderVideos({ projectFolder, projectCode: code, ffprobePath: options.ffprobePath });
+  return discoverProjectFolderVideos({ projectFolder, projectName: options.projectName, projectCode: code, ffprobePath: options.ffprobePath });
 }
 
 /** Inspect exactly the chosen folder, including projects whose names have no bracketed code. */
@@ -314,5 +325,5 @@ export async function discoverProjectFolderVideos(options: DiscoverProjectFolder
       }
     }
   }));
-  return { projectFolder, deliveryFolder, videos: selectVideoDefaults(results, code ?? undefined), warnings };
+  return { projectFolder, deliveryFolder, videos: selectVideoDefaults(results, code ?? undefined, options.projectName), warnings };
 }

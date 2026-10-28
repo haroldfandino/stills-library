@@ -21,6 +21,9 @@ export function queueProjects(state: AppState): Project[] {
   return (state.projects ?? []).map(project => {
     const entry = state.batch?.entries.find(e => e.project.id === project.id && e.project.studio === project.studio);
     if (!entry || project.status === 'Reviewed' || (entry.status === 'skipped' && project.status !== 'Skip')) return project;
+    // A manual recovery can finish after the automatic run was recorded as
+    // failed. Preserve the live Done status so human review remains available.
+    if (project.status === 'Done' && entry.status !== 'pending' && entry.status !== 'running') return project;
     const status = { pending: 'To Do', running: 'In Process', done: 'Done', skipped: 'Skip', failed: 'In Process' }[entry.status];
     return { ...project, status };
   });

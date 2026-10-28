@@ -7,7 +7,8 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo';
 export const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 export const DRIVE_METADATA_SCOPE = 'https://www.googleapis.com/auth/drive.metadata.readonly';
-export const DEFAULT_GOOGLE_SCOPES = ['openid', 'email', DRIVE_FILE_SCOPE, DRIVE_METADATA_SCOPE] as const;
+export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
+export const DEFAULT_GOOGLE_SCOPES = ['openid', 'email', DRIVE_SCOPE] as const;
 
 export interface StoredGoogleTokens {
   accessToken: string;
@@ -42,18 +43,10 @@ export interface GoogleAuthOptions {
   timeoutMs?: number;
 }
 
-export interface PickerOptions {
-  fileIds?: string[];
-  allowFolders?: boolean;
-  allowMultiple?: boolean;
-  mimeTypes?: string[];
-}
-
 interface OAuthCode {
   code: string;
   redirectUri: string;
   verifier: string;
-  pickedFileIds: string[];
 }
 
 interface TokenResponse {
@@ -79,7 +72,7 @@ function safeError(body: unknown, status: number, endpoint: string): GoogleApiEr
 
 function hasDriveScopes(scope: string | undefined): boolean {
   const values = new Set((scope ?? '').split(/\s+/).filter(Boolean));
-  return values.has(DRIVE_FILE_SCOPE) && values.has(DRIVE_METADATA_SCOPE);
+  return values.has(DRIVE_SCOPE);
 }
 
 export class GoogleAuth {
@@ -107,7 +100,7 @@ export class GoogleAuth {
 
   async currentEmail(): Promise<string | null> {
     const tokens = await this.tokenStore.load();
-    return tokens?.email.toLowerCase() === this.expectedEmail ? tokens.email : null;
+    return tokens?.email.toLowerCase() === this.expectedEmail && hasDriveScopes(tokens.scope) ? tokens.email : null;
   }
 
   async signIn(): Promise<string> {
@@ -115,7 +108,7 @@ export class GoogleAuth {
     const response = await this.exchangeCode(code);
     if (!response.access_token) throw new GoogleApiError('Google did not return an access token.', 502, 'missing_token');
     if (!hasDriveScopes(response.scope)) {
-      throw new GoogleApiError('Grant both Drive file access and read-only Drive metadata access to check existing names safely.', 403, 'missing_required_scope');
+      throw new GoogleApiError('Grant full Google Drive access. Stills Library restricts changes to its configured destinations and Stills sheets.', 403, 'missing_required_scope');
     }
     const email = await this.fetchEmail(response.access_token);
     if (email.toLowerCase() !== this.expectedEmail) {
@@ -134,32 +127,13 @@ export class GoogleAuth {
     return email;
   }
 
-  /**
-   * Grants this OAuth client access to pre-existing files selected by the user.
-   * Google requires the Picker request itself to use ONLY drive.file. It does not
-   * replace the normal session token, which also carries read-only metadata scope.
-   */
-  async pickFiles(options: PickerOptions = {}): Promise<string[]> {
-    await this.getAccessToken();
-    const extra: Record<string, string> = {
-      prompt: 'consent', trigger_onepick: 'true', include_granted_scopes: 'false',
-    };
-    if (options.fileIds?.length) extra.file_ids = options.fileIds.join(',');
-    if (options.allowFolders) extra.allow_folder_selection = 'true';
-    if (options.allowMultiple) extra.allow_multiple = 'true';
-    if (options.mimeTypes?.length) extra.mimetypes = options.mimeTypes.join(',');
-    const code = await this.authorize([DRIVE_FILE_SCOPE], extra);
-    await this.exchangeCode(code); // Google requires exchanging Picker's authorization code.
-    return code.pickedFileIds;
-  }
-
   async getAccessToken(forceRefresh = false): Promise<string> {
     const tokens = await this.tokenStore.load();
     if (!tokens || tokens.email.toLowerCase() !== this.expectedEmail) {
       throw new GoogleApiError(`Sign in with ${this.expectedEmail} in Stills Library.`, 401, 'auth_required');
     }
     if (!hasDriveScopes(tokens.scope)) {
-      throw new GoogleApiError('Google session lacks required Drive access; sign in again and grant all requested permissions.', 403, 'missing_required_scope');
+      throw new GoogleApiError('Sign in again to upgrade Google Drive access. Existing reviews and deliveries are preserved.', 403, 'missing_required_scope');
     }
     if (!forceRefresh && tokens.accessToken && tokens.expiresAt > Date.now() + 60_000) return tokens.accessToken;
     if (!tokens.refreshToken) throw new GoogleApiError('Google session expired; sign in again.', 401, 'auth_required');
@@ -293,7 +267,6 @@ export class GoogleAuth {
         code,
         redirectUri,
         verifier,
-        pickedFileIds: (query.get('picked_file_ids') ?? '').split(',').map(id => id.trim()).filter(Boolean),
       };
     } finally {
       clearTimeout(timeout);

@@ -60,8 +60,22 @@ export class JsonStore {
       const next = structuredClone(this.value);
       change(next);
       const temp = `${this.file}.${crypto.randomUUID()}.tmp`;
-      await fs.writeFile(temp, JSON.stringify(next, null, 2), { mode: 0o600 });
-      await fs.rename(temp, this.file);
+      try {
+        await fs.writeFile(temp, JSON.stringify(next, null, 2), { mode: 0o600 });
+        // Windows readers and virus scanners can briefly open state.json
+        // without delete sharing. Retry the atomic replace; never truncate or
+        // remove the last committed state to work around a sharing violation.
+        for (let attempt = 0; ; attempt++) {
+          try { await fs.rename(temp, this.file); break; }
+          catch (error) {
+            if (!['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '') || attempt >= 19) throw error;
+            await new Promise(resolve => setTimeout(resolve, Math.min(250, 25 * (attempt + 1))));
+          }
+        }
+      } catch (error) {
+        await fs.rm(temp, { force: true }).catch(() => {});
+        throw error;
+      }
       this.value = next;
     });
     await this.writeChain;

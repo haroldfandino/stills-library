@@ -22,6 +22,7 @@ export interface Project {
 }
 
 export interface Video {
+  skipReason?: string;
   id: string;
   path: string;
   name: string;

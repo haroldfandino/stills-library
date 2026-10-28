@@ -94,6 +94,24 @@ describe('project lookup', () => {
 });
 
 describe('video defaults', () => {
+  it('skips unrelated filenames before ranking, and explains the skipped candidates', () => {
+    const files = [video('MMTBMYV130H.mov'), video('MMTCSSV115H.mov'), video('Monarch_15_Social.mp4', { durationSec: 15, declaredDurationSec: 15 })];
+    const result = selectVideoDefaults(files, '1278', '[1278]Monarch_TVCampaign2025');
+    expect(result.filter(v => v.selected).map(v => v.name)).toEqual(['Monarch_15_Social.mp4']);
+    expect(result[0].skipReason).toContain('Monarch');
+    expect(result[1].skipReason).toContain('Monarch');
+    expect(result[2].skipReason).toBeUndefined();
+    expect(files.every(v => !v.selected)).toBe(true);
+  });
+  it('ignores case and separators in the client name, without accepting the parent folder as a filename match', () => {
+    const files = [video('tubby-todd_BlackFriday.mp4'), video('OtherClient.mp4', { path: '/TubbyTodd/OtherClient.mp4' })];
+    const result = selectVideoDefaults(files, '144SB', '[144SB]TubbyTodd_BlackFriday');
+    expect(result.map(v => v.selected)).toEqual([true, false]);
+  });
+  it('selects nothing when none of the filenames match, with no automatic fallback', () => {
+    const result = selectVideoDefaults([video('MMTBMYV130H.mov')], '1278', '[1278]Monarch_TVCampaign2025');
+    expect(result[0].selected).toBe(false);
+  });
   it('selects the longest Social H.264 creative per aspect, then resolution', () => {
     const candidates = [
       video('short', { durationSec: 15, declaredDurationSec: 15 }),
