@@ -1,0 +1,77 @@
+--- a/stills_tool/core.py
++++ b/stills_tool/core.py
+@@ -50,6 +50,12 @@
+     if found:
+         return found
+     raise RuntimeError(f"{name} is unavailable. Install FFmpeg or use the bundled desktop app.")
++
++
++def _mov_input_options(source):
++    # Some QuickTime deliveries refer to a chapter track that was not included.
++    # Chapter metadata is irrelevant to frame extraction; retain video timing.
++    return ["-ignore_chapters", "1"] if Path(source).suffix.lower() == ".mov" else []
+ 
+ 
+ def _run(args, cancel=None):
+@@ -103,7 +109,7 @@
+                 "frame=best_effort_timestamp,best_effort_timestamp_time,pkt_duration_time,width,height:"
+                 "stream=width,height,pix_fmt,avg_frame_rate,time_base,color_space,color_transfer,"
+                 "color_primaries,color_range,nb_frames,sample_aspect_ratio:stream_side_data=rotation:"
+-                "format=duration", "-of", "json", str(path)], cancel)
++                "format=duration", "-of", "json", *_mov_input_options(path), str(path)], cancel)
+     data = json.loads(raw)
+     if not data.get("streams") or not data.get("frames"):
+         raise ValueError("The file has no decodable video frames.")
+@@ -244,7 +250,7 @@
+     preview_dir = directory / "previews"
+     preview_dir.mkdir()
+     error_file = tempfile.TemporaryFile()
+-    process = subprocess.Popen([find_tool("ffmpeg"), "-v", "error", "-nostdin", "-i", str(source),
++    process = subprocess.Popen([find_tool("ffmpeg"), "-v", "error", "-nostdin", *_mov_input_options(source), "-i", str(source),
+                                 "-map", "0:v:0", *_filter_file(directory, "scan", filter_value),
+                                 "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=error_file,
+@@ -340,7 +346,7 @@
+     filters = "select=" + select + "," + color_filter(video) + ",format=bgr24"
+     errors_file = tempfile.TemporaryFile()
+     process = subprocess.Popen(
+-        [find_tool("ffmpeg"), "-v", "error", "-nostdin", "-i", str(source), "-map", "0:v:0",
++        [find_tool("ffmpeg"), "-v", "error", "-nostdin", *_mov_input_options(source), "-i", str(source), "-map", "0:v:0",
+          *_filter_file(directory, "native_candidates", filters), "-fps_mode", "passthrough",
+          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors_file, creationflags=CREATE_FLAGS)
+@@ -462,14 +468,14 @@
+     filters += ",format=bgr24"
+     prefix = [find_tool("ffmpeg"), "-v", "error", "-nostdin", "-copyts"]
+     seek = ["-ss", str(max(0, timestamp - 1.0))] if timestamp > 1 else []
+-    args = prefix + seek + ["-i", str(source), "-map", "0:v:0", "-vf", filters,
++    args = prefix + seek + [*_mov_input_options(source), "-i", str(source), "-map", "0:v:0", "-vf", filters,
+                             "-frames:v", "1", "-fps_mode", "passthrough",
+                             "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+     raw = _run(args, cancel)
+     if len(raw) != width * height * 3:
+         # Some containers reset timestamps on seek. Decode by original index as fallback.
+         filters = filters.replace(f"select=eq(pts\\,{pts})", f"select=eq(n\\,{index})")
+-        args = prefix + ["-i", str(source), "-map", "0:v:0", "-vf", filters,
++        args = prefix + [*_mov_input_options(source), "-i", str(source), "-map", "0:v:0", "-vf", filters,
+                          "-frames:v", "1", "-fps_mode", "passthrough",
+                          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+         raw = _run(args, cancel)
+@@ -481,7 +487,7 @@
+ def _native_hashes(source, video, indexes, directory, cancel):
+     select = "+".join(f"eq(n\\,{i})" for i in indexes)
+     raw = _run([find_tool("ffmpeg"), "-v", "error", "-nostdin", "-noautorotate",
+-                "-i", str(source), "-map", "0:v:0",
++                *_mov_input_options(source), "-i", str(source), "-map", "0:v:0",
+                 *_filter_file(directory, "hashes", "select=" + select),
+                 "-fps_mode", "passthrough", "-pix_fmt", video["pix_fmt"],
+                 "-c:v", "rawvideo", "-f", "framehash", "-hash", "sha256", "-"], cancel)
+@@ -1085,7 +1091,7 @@
+     pattern = str(directory).replace("%", "%%") + os.sep + f".export_%06d.{extension}"
+     _progress(progress, "Exporting original-resolution stills", 0, len(requested))
+     try:
+-        _run([find_tool("ffmpeg"), "-v", "error", "-nostdin", "-i", str(source),
++        _run([find_tool("ffmpeg"), "-v", "error", "-nostdin", *_mov_input_options(source), "-i", str(source),
+               "-map", "0:v:0", *_filter_file(directory, "export", filters),
+               "-fps_mode", "passthrough", "-start_number", "1", *codec_options, pattern], cancel)
+         temporaries = sorted(directory.glob(f".export_*.{extension}"))

@@ -89,6 +89,11 @@ if (-not (Get-Content -LiteralPath $ocrPath -Raw).Contains('recognition_error=st
     Invoke-Checked 'git' @('-C', $extractDirectory, 'apply', '--check', $patch)
     Invoke-Checked 'git' @('-C', $extractDirectory, 'apply', $patch)
 }
+if (-not (Get-Content -LiteralPath $corePath -Raw).Contains('def _mov_input_options(')) {
+    $patch = Join-Path $repoRoot 'patches\extract-stills-mov-chapters.patch'
+    Invoke-Checked 'git' @('-C', $extractDirectory, 'apply', '--check', $patch)
+    Invoke-Checked 'git' @('-C', $extractDirectory, 'apply', $patch)
+}
 $buildArguments = @((Join-Path $PSScriptRoot 'build-native.py'), '--extract-root', $extractDirectory, '--rename-script', $renameSource)
 if ($FfmpegDir) {
     $buildArguments += @('--ffmpeg-dir', (Resolve-Path -LiteralPath $FfmpegDir).Path)

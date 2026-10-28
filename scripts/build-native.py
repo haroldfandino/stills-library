@@ -88,6 +88,8 @@ def main() -> int:
             raise ValueError("Apply patches/extract-stills-percent-paths.patch before building.")
         if 'recognition_error=str(error)' not in (extract_root / 'stills_tool' / 'text_ocr.py').read_text(encoding='utf-8'):
             raise ValueError("Apply patches/extract-stills-degenerate-text.patch before building.")
+        if 'def _mov_input_options(' not in core_source.read_text(encoding='utf-8'):
+            raise ValueError("Apply patches/extract-stills-mov-chapters.patch before building.")
         if not rename_source.is_file() or rename_source.name != "rename_stills.py":
             raise ValueError(f"Missing original Rename Stills script: {rename_source}")
         run([sys.executable, "-m", "PyInstaller", "--version"])
