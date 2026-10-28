@@ -190,6 +190,11 @@ async function dispatch(method: string, args: unknown[], origin: 'gui' | 'cli'):
       return shortcut;
     }
     case 'ensureReviewedStatusOptions': return currentWorkspace().ensureReviewedStatusOptions();
+    case 'setManualStatus':
+      if (origin !== 'gui') throw new Error('Change project status in the app.');
+      assertStudio(args[0]);
+      if (args[2] !== 'Done' && args[2] !== 'Reviewed') throw new Error('Choose Completed or Reviewed.');
+      return service.setManualStatus(args[0], String(args[1] ?? ''), args[2]);
     case 'setReviewed':
       if (origin !== 'gui') throw new Error('Human review must be marked in the app.');
       assertStudio(args[0]);

@@ -673,7 +673,24 @@ describe('reviewing a completed delivery again', () => {
     expect(counters).toEqual({ analyses: 1, exports: 1 });
     await service.reviewAgain(done.id);
     expect(workspace.rows[0].status).toBe('In Process');
-    await expect(service.setReviewed(done.studio, done.projectId, true)).rejects.toThrow('Save or finish');
+    await service.setManualStatus(done.studio, done.projectId, 'Done');
+    expect(service.getSession(done.id)).toMatchObject({ status: 'awaiting_stills', deferred: true });
+    await service.setReviewed(done.studio, done.projectId, true);
+    expect(workspace.rows[0].status).toBe('Reviewed');
+    expect(workspace.files).toEqual(before);
+  });
+
+  test('manually completes a still review without exporting or touching Drive', async () => {
+    const { service, workspace, counters, analyzed } = await setupVersions();
+    const before = structuredClone(service.getSession(analyzed.id));
+    const files = structuredClone(workspace.files);
+    await service.setManualStatus(analyzed.studio, analyzed.projectId, 'Done');
+    expect(workspace.rows[0].status).toBe('Done');
+    expect(service.getSession(analyzed.id)).toEqual({ ...before, deferred: true });
+    await service.setManualStatus(analyzed.studio, analyzed.projectId, 'Reviewed');
+    expect(workspace.rows[0].status).toBe('Reviewed');
+    expect(workspace.files).toEqual(files);
+    expect(counters).toEqual({ analyses: 1, exports: 0 });
   });
 
   test('refuses a stale human review checkbox when the sheet changes', async () => {

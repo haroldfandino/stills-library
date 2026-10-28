@@ -116,6 +116,7 @@ export interface StillsApi {
   ): Promise<unknown>;
   skip(sessionId: string): Promise<unknown>;
   resume(sessionId: string): Promise<unknown>;
+  setManualStatus(studio: Studio, projectId: string, status: 'Done' | 'Reviewed'): Promise<unknown>;
   setReviewed(studio: Studio, projectId: string, reviewed: boolean): Promise<unknown>;
   reviewAgain(sessionId: string): Promise<unknown>;
   setReviewOpen(sessionId: string, open: boolean): Promise<unknown>;

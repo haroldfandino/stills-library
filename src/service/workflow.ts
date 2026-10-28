@@ -745,19 +745,31 @@ export class WorkflowService {
   }
 
   setReviewed(studio: Studio, projectId: string, reviewed: boolean): Promise<void> {
+    return this.setManualStatus(studio, projectId, reviewed ? 'Reviewed' : 'Done');
+  }
+
+  setManualStatus(studio: Studio, projectId: string, status: 'Done' | 'Reviewed'): Promise<void> {
     return this.serial(async () => {
-      if (this.automaticRunning) throw new Error('Wait for automatic processing to finish before marking a human review.');
+      if (!['Done', 'Reviewed'].includes(status)) throw new Error('Choose Completed or Reviewed.');
       const project = this.store.read(data => data.projects.find(p => p.studio === studio && p.id === projectId));
-      if (!project) throw new Error('Refresh projects before marking a review.');
-      const active = this.store.read(data => data.sessions.some(s => s.studio === studio && s.projectId === projectId && !TERMINAL.has(s.status) && !s.deferred));
-      if (active) throw new Error('Save or finish the current review before marking this project Reviewed.');
+      if (!project) throw new Error('Refresh projects before changing status.');
+      const sessions = this.store.read(data => data.sessions.filter(s => s.studio === studio && s.projectId === projectId));
+      if (sessions.some(s => ['discovering', 'analyzing', 'exporting', 'uploading'].includes(s.status)) ||
+          this.store.read(data => data.batch?.status === 'running' && data.batch.entries.some(e => e.project.studio === studio && e.project.id === projectId && ['pending', 'running'].includes(e.status)))) {
+        throw new Error('Wait for this project to finish processing or pause its queue before changing status.');
+      }
       const workspace = this.options.getWorkspace();
       const row = (await workspace.listProjects(studio)).find(r => r.rowNumber === project.row);
-      if (!row || row.name !== project.name || row.status !== project.status) throw new Error('The spreadsheet row changed. Refresh projects before marking a review.');
-      if (!['Done', 'Reviewed'].includes(row.status)) throw new Error('Only a completed delivery can be marked Reviewed.');
-      const status = reviewed ? 'Reviewed' : 'Done';
+      if (!row || row.name !== project.name || row.status !== project.status) throw new Error('The spreadsheet row changed. Refresh projects before changing status.');
       await workspace.updateStatus(row, status, row.status);
-      await this.store.update(data => { const p = data.projects.find(p => p.studio === studio && p.id === projectId); if (p) p.status = status; });
+      await this.store.update(data => {
+        const p = data.projects.find(p => p.studio === studio && p.id === projectId);
+        if (p) p.status = status;
+        // Preserve review drafts and delivery evidence without claiming an app-verified delivery.
+        for (const session of data.sessions) {
+          if (session.studio === studio && session.projectId === projectId && !TERMINAL.has(session.status)) session.deferred = true;
+        }
+      });
       this.notify();
     });
   }

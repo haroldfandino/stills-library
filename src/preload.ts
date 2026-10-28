@@ -20,6 +20,7 @@ const api = {
   getSession: (id: string) => invoke('getSession', id),
   skip: (id: string) => invoke('skip', id),
   resume: (id: string) => invoke('resume', id),
+  setManualStatus: (studio: Studio, id: string, status: 'Done' | 'Reviewed') => invoke('setManualStatus', studio, id, status),
   setReviewed: (studio: Studio, id: string, reviewed: boolean) => invoke('setReviewed', studio, id, reviewed),
   reviewAgain: (id: string) => invoke('reviewAgain', id),
   setReviewOpen: (id: string, open: boolean) => invoke('setReviewOpen', id, open),
