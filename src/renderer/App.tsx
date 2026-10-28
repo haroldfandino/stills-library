@@ -6,6 +6,8 @@ import { VirtualFrameGrid } from "./VirtualFrameGrid";
 import { ReviewHistory, type ReviewSelection } from "./review-history";
 import { previewNavigation, type PreviewMode } from "./preview-navigation";
 import { projectSession, queueProjects } from "./session-view";
+import { FolderSelectionPanel } from "./FolderSelectionPanel";
+import { folderSelectionIds, reviewFolders, toggleFolderChoice } from "./folder-selection";
 
 type QueueFilter = "All" | "To Do" | "In Process" | "Done" | "Reviewed" | "Skip";
 
@@ -183,12 +185,15 @@ export default function App() {
   const projectListRef = useRef<HTMLDivElement>(null);
   const selectedProjectRowRef = useRef<HTMLButtonElement>(null);
   const [skipVideosOpen, setSkipVideosOpen] = useState(false);
+  const [folderSelectionOpen, setFolderSelectionOpen] = useState(false);
+  const [foldersToUnselect, setFoldersToUnselect] = useState<Set<string>>(new Set());
+  const [folderUnselectNotice, setFolderUnselectNotice] = useState<{ sessionId: string; updatedAt?: string; count: number }>();
   const [videosToSkip, setVideosToSkip] = useState<Set<string>>(new Set());
   const reviewHistory = useRef(new ReviewHistory());
   const reviewSelection = useRef<ReviewSelection>({ frames: new Set(), skipped: {} });
   const [skippedVideoFrames, setSkippedVideoFrames] = useState<Record<string, string[]>>({});
   const [lastVideoSkip, setLastVideoSkip] = useState<{ sessionId: string; updatedAt?: string; videoCount: number; frameIds: string[]; videoIds: string[] }>();
-  useEffect(() => { setApprovedOnly(false); setReviewVideoId(""); setSkipVideosOpen(false); setVideosToSkip(new Set()); setLastVideoSkip(undefined); }, [selectedKey]);
+  useEffect(() => { setApprovedOnly(false); setReviewVideoId(""); setSkipVideosOpen(false); setVideosToSkip(new Set()); setLastVideoSkip(undefined); setFolderSelectionOpen(false); setFoldersToUnselect(new Set()); setFolderUnselectNotice(undefined); }, [selectedKey]);
   const [detail, setDetail] = useState<Session>();
 
   const refresh = useCallback(async () => {
@@ -373,6 +378,12 @@ export default function App() {
   const normalizedTypeTag = formatTag(typeTag);
   const namingReady = Boolean(normalizedProjectTag && normalizedTypeTag && /^20\d{2}$/.test(yearTag));
   const frameFolder = (frame: Frame) => frame.videoId ? session?.versionFolders?.[frame.videoId] ?? "" : "";
+  const folderFrames = useMemo(() => (session?.frames ?? [])
+    .filter(frame => !frame.videoId || !Object.hasOwn(skippedVideoFrames, frame.videoId))
+    .map(frame => ({ id: frameKey(frame), folder: frame.videoId ? session?.versionFolders?.[frame.videoId] ?? "" : "" })),
+    [session?.frames, session?.versionFolders, skippedVideoFrames]);
+  const selectableFolders = useMemo(() => reviewFolders(folderFrames, checkedFrames), [folderFrames, checkedFrames]);
+  const folderIdsToUnselect = useMemo(() => folderSelectionIds(folderFrames, checkedFrames, foldersToUnselect), [folderFrames, checkedFrames, foldersToUnselect]);
   const filenamePreviews = selectedFrames.map((frame, index) => {
     const folder = frameFolder(frame);
     const filename = `${normalizedProjectTag}_${normalizedTypeTag}_Still_${String(index + 1).padStart(2, "0")}.png`;
@@ -394,12 +405,21 @@ export default function App() {
     setCheckedFrames(next.frames);
     setSkippedVideoFrames(next.skipped);
     setLastVideoSkip(undefined);
+    setFolderUnselectNotice(undefined);
     try { sessionStorage.setItem('stills-review-draft', JSON.stringify({ sessionId: session?.id,
       updatedAt: session?.updatedAt, frameIds: [...next.frames], skippedVideoFrames: next.skipped })); } catch { /* A full browser cache must not block review. */ }
   };
   const updateFrameSelection = (frames: Set<string>, skipped = skippedVideoFrames) => {
     const next = { frames, skipped };
     if (reviewHistory.current.record(reviewSelection.current, next)) applyReviewSelection(next);
+  };
+  const unselectFolders = () => {
+    if (!session || !folderIdsToUnselect.size) return;
+    const count = folderIdsToUnselect.size;
+    updateFrameSelection(new Set([...checkedFrames].filter(id => !folderIdsToUnselect.has(id))));
+    setFolderUnselectNotice({ sessionId: session.id, updatedAt: session.updatedAt, count });
+    setFolderSelectionOpen(false);
+    setFoldersToUnselect(new Set());
   };
   const undoReview = () => {
     const previous = reviewHistory.current.undo(reviewSelection.current);
@@ -609,8 +629,10 @@ export default function App() {
               </section>}
 
               {session?.status === "awaiting_stills" && !session.deferred && !loadingDetail && <section className="review-section"><div className="section-heading"><div><span className="eyebrow">APPROVAL 02 / 02</span><h3>Choose stills</h3><p>{session.previousDeliveryManifest ? "Your previous selection is preselected for review. Adjust the stills and check the folders and filenames before approving again." : "One smart pick per shot plus the final source frame is preselected. Add or remove frames, then review the folders and filenames before export."}</p></div><div className="selection-count"><strong>{frameSelections.length}</strong><span>of {availableFrames.length} selected</span></div></div>
-                <div className="selection-actions"><ActionButton title="Undo last review change (Ctrl+Z)" onClick={undoReview} disabled={!reviewHistory.current.canUndo || Boolean(busy)}>Undo</ActionButton><ActionButton title="Redo review change (Ctrl+Y or Ctrl+Shift+Z)" onClick={redoReview} disabled={!reviewHistory.current.canRedo || Boolean(busy)}>Redo</ActionButton><details className="selection-menu"><summary>Selection ⋯</summary><div onClick={event => { if ((event.target as HTMLElement).closest("button")) event.currentTarget.parentElement?.removeAttribute("open"); }}>{!approvedOnly && <ActionButton variant="quiet" onClick={() => updateFrameSelection(new Set([...checkedFrames, ...videoFrames.map(frameKey)]))} disabled={Boolean(busy)}>{reviewVideoId ? "Select all in this video" : "Select all"}</ActionButton>}<ActionButton variant="quiet" onClick={() => { if (reviewVideoId) skipVideos(new Set([reviewVideoId])); else updateFrameSelection(new Set()); }} disabled={Boolean(busy) || (reviewVideoId ? !videoCounts.get(reviewVideoId)?.approved : !checkedFrames.size)}>{reviewVideoId ? "Skip this video" : "Clear selection"}</ActionButton><ActionButton onClick={() => { setVideosToSkip(new Set(reviewVideoId && videoCounts.get(reviewVideoId)?.approved ? [reviewVideoId] : [])); setSkipVideosOpen(open => !open); }} disabled={Boolean(busy)}>Skip videos…</ActionButton></div></details><ActionButton onClick={showDeliverySettings} disabled={Boolean(busy)}>Delivery settings ↓</ActionButton></div>
+                <div className="selection-actions"><ActionButton title="Undo last review change (Ctrl+Z)" onClick={undoReview} disabled={!reviewHistory.current.canUndo || Boolean(busy)}>Undo</ActionButton><ActionButton title="Redo review change (Ctrl+Y or Ctrl+Shift+Z)" onClick={redoReview} disabled={!reviewHistory.current.canRedo || Boolean(busy)}>Redo</ActionButton><details className="selection-menu"><summary>Selection ⋯</summary><div onClick={event => { if ((event.target as HTMLElement).closest("button")) event.currentTarget.parentElement?.removeAttribute("open"); }}>{!approvedOnly && <ActionButton variant="quiet" onClick={() => updateFrameSelection(new Set([...checkedFrames, ...videoFrames.map(frameKey)]))} disabled={Boolean(busy)}>{reviewVideoId ? "Select all in this video" : "Select all"}</ActionButton>}<ActionButton variant="quiet" onClick={() => { if (reviewVideoId) skipVideos(new Set([reviewVideoId])); else updateFrameSelection(new Set()); }} disabled={Boolean(busy) || (reviewVideoId ? !videoCounts.get(reviewVideoId)?.approved : !checkedFrames.size)}>{reviewVideoId ? "Skip this video" : "Clear selection"}</ActionButton><ActionButton onClick={() => { setVideosToSkip(new Set(reviewVideoId && videoCounts.get(reviewVideoId)?.approved ? [reviewVideoId] : [])); setFolderSelectionOpen(false); setSkipVideosOpen(open => !open); }} disabled={Boolean(busy)}>Skip videos…</ActionButton><ActionButton onClick={() => { setSkipVideosOpen(false); setFoldersToUnselect(new Set()); setFolderSelectionOpen(open => !open); }} disabled={Boolean(busy) || !availableFrames.length}>Unselect folders…</ActionButton></div></details><ActionButton onClick={showDeliverySettings} disabled={Boolean(busy)}>Delivery settings ↓</ActionButton></div>
                 {session.error && <div className="review-alert" role="alert"><strong>Delivery paused</strong><span>{session.error}</span></div>}
+                {folderSelectionOpen && <FolderSelectionPanel folders={selectableFolders} choices={foldersToUnselect} stillCount={folderIdsToUnselect.size} busy={Boolean(busy)} onToggle={path => setFoldersToUnselect(previous => toggleFolderChoice(previous, path))} onAll={() => setFoldersToUnselect(new Set(['']))} onClear={() => setFoldersToUnselect(new Set())} onApply={unselectFolders} onClose={() => setFolderSelectionOpen(false)} />}
+                {folderUnselectNotice?.sessionId === session.id && folderUnselectNotice.updatedAt === session.updatedAt && <div className="video-skip-notice" role="status"><span>{folderUnselectNotice.count} stills unselected from folders. Save changes to Drive to apply.</span><ActionButton onClick={undoReview}>Undo</ActionButton></div>}
                 {skipVideosOpen && <section className="video-skip-panel" aria-label="Skip stills by video"><h4>Skip all stills from videos</h4><p>Choose one or more videos to remove from your approved selection. Save changes to Drive when your review is finished.</p><div className="video-skip-tools"><ActionButton onClick={() => setVideosToSkip(new Set(skipCandidateVideos.filter(video => videoCounts.get(video.id)!.approved > 0).map(video => video.id)))}>Select all videos</ActionButton><ActionButton onClick={() => setVideosToSkip(new Set())} disabled={!videosToSkip.size}>Clear video selection</ActionButton></div><div className="video-skip-list">{skipCandidateVideos.map(video => <label key={video.id}><input type="checkbox" aria-label={`Skip all stills from ${video.name || shortName(video.path)}`} checked={videosToSkip.has(video.id)} disabled={!videoCounts.get(video.id)!.approved} onChange={() => setVideosToSkip(previous => { const next = new Set(previous); if (next.has(video.id)) next.delete(video.id); else next.add(video.id); return next; })}/><span><strong>{video.name || shortName(video.path)}</strong><small>{videoCounts.get(video.id)!.approved} approved stills</small></span></label>)}</div><div className="video-skip-tools"><ActionButton variant="primary" onClick={() => skipVideos(videosToSkip)} disabled={!skipStillCount}>Skip {videosToSkip.size} {videosToSkip.size === 1 ? "video" : "videos"} · {skipStillCount} stills</ActionButton><ActionButton onClick={() => setSkipVideosOpen(false)}>Cancel</ActionButton></div></section>}
                 {lastVideoSkip?.sessionId === session.id && lastVideoSkip.updatedAt === session.updatedAt && <div className="video-skip-notice" role="status"><span>{lastVideoSkip.videoCount} {lastVideoSkip.videoCount === 1 ? "video skipped" : "videos skipped"} · {lastVideoSkip.frameIds.length} stills deselected. Save changes to Drive to apply.</span><ActionButton onClick={undoReview}>Undo</ActionButton></div>}
                 {Object.keys(skippedVideoFrames).length > 0 && <div className="video-skip-notice"><span>{Object.keys(skippedVideoFrames).length} skipped videos hidden from review.</span><ActionButton onClick={() => { updateFrameSelection(new Set([...checkedFrames, ...Object.values(skippedVideoFrames).flat()]), {}); setLastVideoSkip(undefined); }}>Restore skipped videos</ActionButton></div>}
